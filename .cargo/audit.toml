@@ -8,4 +8,12 @@ ignore = [
     # Revisit whenever an upgraded rsa lands upstream.
     # https://rustsec.org/advisories/RUSTSEC-2023-0071
     "RUSTSEC-2023-0071",
+    # crypto-bigint 0.5 timing variability in "constant-time" ops. Pulled in via
+    # elliptic-curve 0.13 -> p256/k256/p384 -> jwt-simple -> web-push; the fix
+    # (>=0.7.6) needs the whole RustCrypto 0.14 stack, which jwt-simple/web-push
+    # haven't moved to. Our only use is ES256 VAPID signing of push JWTs on the
+    # server, with no attacker-observable per-operation timing. Drop this once
+    # web-push/jwt-simple release on elliptic-curve 0.14.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0387
+    "RUSTSEC-2026-0387",
 ]
