@@ -24,7 +24,7 @@ argon2 = "0.5"
 # enables it via Cargo's feature unification.
 password-hash = { version = "0.5", features = ["getrandom"] }
 sha2 = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 hex = "0.4"
 tower_governor = "0.8"
 web-push = { workspace = true }
