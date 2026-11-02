@@ -9,7 +9,7 @@
 # `channel = "stable"`, so rustup installs whatever stable is current at build
 # time once the source is copied in. Pin that file to an exact version (e.g.
 # "1.xx.0") for a fully reproducible toolchain.
-FROM rust:1-slim-trixie@sha256:4cd829461bd5c4d511c32e269da9cb8929223b666519d8004e35fc8d1d771ab7 AS builder
+FROM rust:1-slim-trixie@sha256:b8e062b1c3a80183df83d9ba187cadd2b5ab84bc78d453dbfeb2fccd5f982247 AS builder
 WORKDIR /build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
