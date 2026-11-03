@@ -787,6 +787,9 @@ fn EventForm(uid: Option<String>, occ_start: Option<String>, seed_date: Option<S
                     }
                 }
             }
+            if all_day() && !reminder().is_empty() {
+                p { class: "muted", "Koko päivän tapahtumissa muistutus lasketaan klo 9:stä." }
+            }
 
             label { "Paikka" }
             input { value: "{location}", oninput: move |e| location.set(e.value()) }

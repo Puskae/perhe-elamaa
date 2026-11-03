@@ -267,6 +267,31 @@ pub fn expand_events(
 /// The largest offset the editor offers (1 vrk). Bounds the scan window.
 pub const MAX_REMINDER_OFFSET_MIN: i64 = 1440;
 
+/// All-day events start at 00:00, which is a bad moment to be reminded. Their
+/// reminders count back from 09:00 (540 min past midnight) on the start's
+/// DATE instead, so "1 vrk ennen" fires at 09:00 the day before. The anchor is
+/// taken from the date alone, so it holds even if a stored all-day start is
+/// not exactly midnight.
+pub const ALL_DAY_ANCHOR_MIN: i64 = 540;
+
+/// How far an all-day occurrence's start can lie AFTER its 09:00 anchor: a
+/// start at 23:59 is up to 24 h − 9 h = 15 h past it. Widens the scan
+/// window's end in [`due_reminders`].
+const ALL_DAY_START_AFTER_ANCHOR_MIN: i64 = 24 * 60 - ALL_DAY_ANCHOR_MIN;
+
+/// The moment an occurrence's reminder offset counts back from: its start
+/// for timed events, 09:00 on the start's date for all-day ones. `None` on a
+/// malformed timestamp.
+fn reminder_anchor(occ: &Event) -> Option<String> {
+    if !occ.all_day {
+        return Some(occ.starts_at.clone());
+    }
+    // `.get(..10)` is the non-panicking slice: None if the string is shorter
+    // (or 10 isn't a char boundary), instead of a panic like `[..10]`.
+    let date = occ.starts_at.get(..10)?;
+    crate::recur::shift_minutes(&format!("{date}T00:00:00Z"), ALL_DAY_ANCHOR_MIN)
+}
+
 /// One reminder that should fire now.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DueReminder {
@@ -275,28 +300,41 @@ pub struct DueReminder {
     pub occ_start: String,
     pub title: String,
     pub attendee_ids: Vec<i64>,
+    /// Whether the occurrence is an all-day event (the push text differs).
+    pub all_day: bool,
 }
 
 /// Pure scheduler core, shared so Phase 6 chores can reuse it. Due iff
 /// `fire_at ≤ now < fire_at + late_cutoff` with
-/// `fire_at = occ_start − reminder_minutes` (lexical string compares —
-/// uniform floating formatting makes that valid).
+/// `fire_at = anchor − reminder_minutes`, where `anchor` is the occurrence
+/// start for timed events and 09:00 ([`ALL_DAY_ANCHOR_MIN`]) on the start's
+/// date for all-day ones (lexical string compares — uniform floating
+/// formatting makes that valid).
 pub fn due_reminders(
     events: &[Event],
     exdates: &[Exdate],
     now: &str,
     late_cutoff_min: i64,
 ) -> Vec<DueReminder> {
-    // Occurrences that could be due start at most late_cutoff behind
-    // (fire moment just missed) and MAX_OFFSET ahead (longest lead time).
+    // Due means anchor ∈ (now + offset − late_cutoff, now + offset], with
+    // 0 ≤ offset ≤ MAX_OFFSET. For timed events start = anchor, so starts lie
+    // in [now − late_cutoff, now + MAX_OFFSET]. For all-day ones the anchor is
+    // 09:00 of the start's date, so start − anchor ∈ [−9 h, +15 h): the window
+    // opens ALL_DAY_ANCHOR_MIN earlier (a midnight start, anchor 9 h later)
+    // and closes ALL_DAY_START_AFTER_ANCHOR_MIN later (a late-evening start,
+    // anchor up to 15 h earlier). Widening only lets more occurrences be
+    // *considered*; the `fire_at ≤ now < fire_end` check below still decides
+    // what is due.
     // `checked_*` integer ops return None on overflow instead of panicking
     // (debug) or silently wrapping (release).
     let (Some(win_start), Some(win_end)) = (
         late_cutoff_min
-            .checked_neg()
+            .checked_add(ALL_DAY_ANCHOR_MIN)
+            .and_then(i64::checked_neg)
             .and_then(|m| crate::recur::shift_minutes(now, m)),
         MAX_REMINDER_OFFSET_MIN
             .checked_add(late_cutoff_min)
+            .and_then(|m| m.checked_add(ALL_DAY_START_AFTER_ANCHOR_MIN))
             .and_then(|m| crate::recur::shift_minutes(now, m)),
     ) else {
         return Vec::new();
@@ -308,16 +346,21 @@ pub fn due_reminders(
         let Some(offset) = occ.reminder_minutes else {
             continue;
         };
+        // Timed events count back from their start; all-day ones from 09:00
+        // on their date. A malformed start skips the row.
+        let Some(anchor) = reminder_anchor(&occ) else {
+            continue;
+        };
         // The offset comes from the DB and may predate validation: skip the
         // row (never panic) if the arithmetic overflows. `-i64::MIN` itself
         // overflows, hence `checked_neg`.
         let (Some(fire_at), Some(fire_end)) = (
             offset
                 .checked_neg()
-                .and_then(|m| crate::recur::shift_minutes(&occ.starts_at, m)),
+                .and_then(|m| crate::recur::shift_minutes(&anchor, m)),
             late_cutoff_min
                 .checked_sub(offset)
-                .and_then(|m| crate::recur::shift_minutes(&occ.starts_at, m)),
+                .and_then(|m| crate::recur::shift_minutes(&anchor, m)),
         ) else {
             continue;
         };
@@ -329,6 +372,7 @@ pub fn due_reminders(
                 occ_start: occ.starts_at.clone(),
                 title: occ.title.clone(),
                 attendee_ids: occ.attendee_ids.clone(),
+                all_day: occ.all_day,
             });
         }
     }
@@ -714,6 +758,77 @@ mod tests {
             due_reminders(&[e], &[], "2026-07-06T09:00:00Z", 30).len(),
             1
         );
+    }
+
+    fn all_day_rem_ev(day: &str, next_day: &str, minutes: i64) -> Event {
+        let mut e = rem_ev(
+            &format!("{day}T00:00:00Z"),
+            &format!("{next_day}T00:00:00Z"),
+            minutes,
+        );
+        e.all_day = true;
+        e
+    }
+
+    #[test]
+    fn all_day_day_before_reminder_anchors_at_nine() {
+        // All-day event tomorrow (7.7.) with "1 vrk ennen": anchor is 7.7.
+        // 09:00, so it fires 6.7. 09:00 — NOT at midnight.
+        let e = all_day_rem_ev("2026-07-07", "2026-07-08", 1440);
+        let at = |now: &str| due_reminders(std::slice::from_ref(&e), &[], now, 30);
+        assert!(at("2026-07-06T00:00:00Z").is_empty());
+        assert!(at("2026-07-06T08:59:59Z").is_empty());
+        let due = at("2026-07-06T09:00:00Z");
+        assert_eq!(due.len(), 1);
+        assert!(due[0].all_day);
+        // occ_start stays the real (midnight) start: it is the dedup key.
+        assert_eq!(due[0].occ_start, "2026-07-07T00:00:00Z");
+        assert_eq!(at("2026-07-06T09:29:00Z").len(), 1);
+        // Past the 30 min late cutoff.
+        assert!(at("2026-07-06T09:31:00Z").is_empty());
+    }
+
+    #[test]
+    fn all_day_same_day_reminder_fires_before_nine() {
+        // 60 min before a today-all-day event: 08:00 the same day. Its
+        // occurrence started at 00:00, i.e. 8 h before `now` — the widened
+        // expansion window must still reach it (matters for recurring ones).
+        let mut e = all_day_rem_ev("2026-07-06", "2026-07-07", 60);
+        e.rrule = Some("FREQ=WEEKLY;BYDAY=MO".into());
+        let at = |now: &str| due_reminders(std::slice::from_ref(&e), &[], now, 30);
+        assert!(at("2026-07-06T07:59:00Z").is_empty());
+        let due = at("2026-07-13T08:00:00Z");
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].occ_start, "2026-07-13T00:00:00Z");
+        assert!(at("2026-07-06T08:30:00Z").is_empty());
+    }
+
+    #[test]
+    fn all_day_anchor_uses_the_start_date_not_start_plus_nine_hours() {
+        // A (legacy/odd) all-day start of 20:00 on 7.7.: the anchor is still
+        // 7.7. 09:00, so "1 vrk ennen" fires 6.7. 09:00 — not 7.7. 05:00
+        // (which `start + 540 min − 1440` would give). The occurrence starts
+        // 35 h after `now`, beyond the timed-event window; making it a series
+        // (one-offs bypass the window) checks the window's end is widened.
+        let mut e = rem_ev("2026-07-07T20:00:00Z", "2026-07-08T00:00:00Z", 1440);
+        e.all_day = true;
+        e.rrule = Some("FREQ=WEEKLY;BYDAY=TU".into());
+        let at = |now: &str| due_reminders(std::slice::from_ref(&e), &[], now, 30);
+        assert!(at("2026-07-06T08:59:00Z").is_empty());
+        let due = at("2026-07-06T09:00:00Z");
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].occ_start, "2026-07-07T20:00:00Z");
+        assert!(at("2026-07-07T05:00:00Z").is_empty());
+    }
+
+    #[test]
+    fn timed_reminders_are_not_anchored_and_flagged_timed() {
+        let e = rem_ev("2026-07-06T00:00:00Z", "2026-07-06T01:00:00Z", 60);
+        let due = due_reminders(std::slice::from_ref(&e), &[], "2026-07-05T23:00:00Z", 30);
+        assert_eq!(due.len(), 1);
+        assert!(!due[0].all_day);
+        // The widened window must not make a timed event fire at "09:00 − offset".
+        assert!(due_reminders(&[e], &[], "2026-07-06T08:00:00Z", 30).is_empty());
     }
 
     /// Hostile offsets stored before validation existed must not panic the

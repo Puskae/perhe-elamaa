@@ -1,9 +1,9 @@
 ---
 name: verify
-description: Build, launch, and drive PERKELE locally to verify a change end-to-end (server API via curl; app bundle serving).
+description: Build, launch, and drive Perhe-elämää locally to verify a change end-to-end (server API via curl; app bundle serving).
 ---
 
-# Verifying PERKELE locally
+# Verifying Perhe-elämää locally
 
 ## Build + launch
 

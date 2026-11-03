@@ -270,7 +270,7 @@ async fn run() {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|e| panic!("failed to bind {addr}: {e}"));
-    tracing::info!("PERKELE listening on http://{addr}, serving app from {dist_dir}");
+    tracing::info!("Perhe-elämää listening on http://{addr}, serving app from {dist_dir}");
 
     let (app, rl_cleanup) = router(state, &dist_dir, ip_config);
     // Forget per-client rate-limit buckets that have fully refilled, so the
@@ -328,11 +328,11 @@ fn setup_banner(shown: &str, from_env: bool) -> String {
     let rule = "=".repeat(64);
     if from_env {
         format!(
-            "\n{rule}\n  PERKELE needs first-run setup. Setup token: from PERKELE_SETUP_TOKEN\n{rule}"
+            "\n{rule}\n  Perhe-elämää needs first-run setup. Setup token: from PERKELE_SETUP_TOKEN\n{rule}"
         )
     } else {
         format!(
-            "\n{rule}\n  PERKELE setup token: {shown} — enter it on the setup screen\n  \
+            "\n{rule}\n  Perhe-elämää setup token: {shown} — enter it on the setup screen\n  \
              (new token on every restart until setup is done)\n{rule}"
         )
     }

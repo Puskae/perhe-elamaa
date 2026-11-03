@@ -292,7 +292,9 @@ pub fn NoteTopicScreen(id: i64) -> Element {
                 }
                 if can_modify {
                     button {
-                        class: "clear-btn",
+                        // `note-delete` adds breathing room above; `.clear-btn`
+                        // itself is shared with the grocery screen.
+                        class: "clear-btn note-delete",
                         disabled: !online,
                         // Don't delete on the spot — pop the confirm dialog first.
                         onclick: move |_| confirming_delete.set(true),

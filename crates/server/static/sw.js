@@ -1,4 +1,4 @@
-// PERKELE service worker — app shell caching for offline use.
+// Perhe-elämää service worker — app shell caching for offline use.
 //
 // Strategy:
 //   /api/*       → network-only (never cache server responses)
@@ -82,7 +82,7 @@ self.addEventListener('push', event => {
   // Payload: {"title": "...", "body": "..."} from the server's scheduler.
   const data = event.data ? event.data.json() : {};
   event.waitUntil(
-    self.registration.showNotification(data.title || 'PERKELE', {
+    self.registration.showNotification(data.title || 'Perhe-elämää', {
       body: data.body || '',
       icon: '/icon-192.png',
     })

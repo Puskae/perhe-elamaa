@@ -1,4 +1,4 @@
-# PERKELE
+# Perhe-elämää
 
 ▎ Perhe-elämää. Because in every family there comes a moment when perkele is the only word left.
 
@@ -9,9 +9,11 @@ Built in Rust end-to-end: [Axum](https://github.com/tokio-rs/axum) backend,
 [Dioxus](https://dioxuslabs.com) frontend (web PWA first, native apps later),
 SQLite storage, offline-capable sync.
 
-The project and repo are called PERKELE; the app itself presents as
-**Perhe-elämää** to users (web manifest, page title, login/setup screens,
-test push notification). The UI is in Finnish.
+The project and app are called **Perhe-elämää**; the repo is `perhe-elamaa`.
+The UI is in Finnish. Internal names — the crates and server binary
+(`perkele-server` etc.), the `PERKELE_*` environment variables and the
+`perkele-data` compose volume — keep the project's historical `perkele` name,
+so existing configs and databases keep working.
 
 **Status:** The core feature set is complete:
 
@@ -51,7 +53,7 @@ cargo install cargo-binstall
 cargo binstall dioxus-cli -y
 
 # 3. Clone and build
-git clone https://github.com/Puskae/perkele.git && cd perkele
+git clone https://github.com/Puskae/perhe-elamaa.git && cd perhe-elamaa
 cargo build --workspace
 ```
 
@@ -111,7 +113,7 @@ own defaults for some of these — see [docs/deploy.md](docs/deploy.md).
 ## Deployment
 
 Single Docker image (server binary + built WASM app), published as
-`ghcr.io/puskae/perkele` for **linux/amd64 only**. On ARM64 (e.g. a Raspberry
+`ghcr.io/puskae/perhe-elamaa` for **linux/amd64 only**. On ARM64 (e.g. a Raspberry
 Pi 4/5 on a 64-bit OS) build it locally instead with `docker compose up -d --build`
 — the Dockerfile builds on amd64 and arm64 and needs BuildKit via the buildx plugin
 (Arch `docker-buildx`, Debian/Ubuntu `docker-buildx-plugin`; check with `docker buildx version`).
@@ -120,7 +122,7 @@ reaches it over [Tailscale](https://tailscale.com) via `tailscale serve`
 (automatic HTTPS, private to your tailnet):
 
 ```sh
-docker compose up -d          # uses ghcr.io/puskae/perkele:latest
+docker compose up -d          # uses ghcr.io/puskae/perhe-elamaa:latest
 tailscale serve --bg 8080     # → https://<machine>.<tailnet>.ts.net
 ```
 
@@ -133,9 +135,13 @@ environment, backups, upgrades and error reporting — in
 
 Versions follow [semantic versioning](https://semver.org). A release is a git
 tag `vX.Y.Z`; each one publishes the container image as
-`ghcr.io/puskae/perkele:X.Y.Z`, `:X.Y` and `:latest`. Pin `X.Y.Z` (or `X.Y`)
+`ghcr.io/puskae/perhe-elamaa:X.Y.Z`, `:X.Y` and `:latest`. Pin `X.Y.Z` (or `X.Y`)
 in `compose.yaml` if you'd rather upgrade deliberately. 1.0.0 is the
 first public release.
+
+Images up to 1.0.4 were published as `ghcr.io/puskae/perkele`; from 1.0.5 on
+they are `ghcr.io/puskae/perhe-elamaa`. Existing installs switch the `image:`
+line in their `compose.yaml` when upgrading.
 
 ## Security
 
@@ -147,6 +153,6 @@ Please report vulnerabilities privately as described in
 Copyright (C) 2026 Jani Puska. Licensed under the GNU AGPL v3.0 or later — see
 [LICENSE](LICENSE).
 
-In plain English: you can use, modify and self-host PERKELE freely, but if you
+In plain English: you can use, modify and self-host Perhe-elämää freely, but if you
 run a modified version as a network service for others, you must offer those
 users the source code of your modified version.

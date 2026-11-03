@@ -141,9 +141,15 @@ pub async fn scan_once<P: Pusher>(db: &Db, pusher: &P, now: &str) -> Result<u32,
             } else {
                 due.attendee_ids.clone()
             };
+            // All-day starts are a nominal 00:00 — "Alkaa klo 00:00" would mislead.
+            let body = if due.all_day {
+                "Koko päivän tapahtuma".to_owned()
+            } else {
+                format!("Alkaa klo {}", &due.occ_start[11..16])
+            };
             let payload = serde_json::json!({
                 "title": due.title,
-                "body": format!("Alkaa klo {}", &due.occ_start[11..16]),
+                "body": body,
             })
             .to_string();
             for user_id in recipients {
@@ -697,5 +703,50 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+    #[tokio::test]
+    async fn all_day_reminder_fires_at_nine_with_all_day_body() {
+        let (app, db) = push_app_with_db().await;
+        let cookie = setup_admin(&app).await;
+        // All-day event on 7.7. with "1 vrk ennen".
+        let mut ev = event("ad1", "2026-07-07T00:00:00Z", "2026-07-08T00:00:00Z", 1440);
+        ev["all_day"] = json!(true);
+        let resp = app
+            .clone()
+            .oneshot(req("POST", "/api/calendar/events", &cookie, Some(ev)))
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+        app.clone()
+            .oneshot(req(
+                "POST",
+                "/api/push/subscribe",
+                &cookie,
+                Some(sub_body(&fcm("dev1"))),
+            ))
+            .await
+            .unwrap();
+        let sent = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let pusher = FakePusher {
+            sent: sent.clone(),
+            fail_gone: false,
+        };
+        // Midnight the night before: not yet.
+        assert_eq!(
+            scan_once(&db, &pusher, "2026-07-06T00:00:00Z")
+                .await
+                .unwrap(),
+            0
+        );
+        // 09:00 the day before: one send, no bogus "Alkaa klo 00:00".
+        assert_eq!(
+            scan_once(&db, &pusher, "2026-07-06T09:00:00Z")
+                .await
+                .unwrap(),
+            1
+        );
+        let log = sent.lock().await.clone();
+        assert!(log[0].1.contains("Koko päivän tapahtuma"));
+        assert!(!log[0].1.contains("Alkaa klo"));
     }
 }

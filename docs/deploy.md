@@ -1,6 +1,6 @@
-# Deploying PERKELE
+# Deploying Perhe-elämää
 
-PERKELE ships as a single Docker image: one server binary plus the prebuilt
+Perhe-elämää ships as a single Docker image: one server binary plus the prebuilt
 WASM web app, with SQLite as the only storage. Run it on any always-on Linux
 box you control and put HTTPS in front of it. The published image is
 **linux/amd64 only**; on ARM64 (e.g. a Raspberry Pi 4/5 on a 64-bit OS) build it
@@ -24,7 +24,7 @@ Copy [`compose.yaml`](../compose.yaml) to a directory on your server (or clone
 the repo there), then either pull the published image:
 
 ```sh
-docker compose pull          # ghcr.io/puskae/perkele:latest
+docker compose pull          # ghcr.io/puskae/perhe-elamaa:latest
 docker compose up -d
 ```
 
@@ -135,7 +135,7 @@ Any TLS-terminating proxy works. A minimal [Caddy](https://caddyserver.com)
 `Caddyfile`, which obtains a certificate automatically:
 
 ```
-perkele.your-domain.example {
+perhe.your-domain.example {
     reverse_proxy 127.0.0.1:8080
 }
 ```
@@ -146,7 +146,7 @@ extra configuration. With other proxies, turn response buffering off for
 The streaming endpoints are `/api/grocery/events`, `/api/calendar/stream`,
 `/api/chat/stream` and `/api/announcements/stream`.
 
-If you expose PERKELE to the public internet rather than a private network, do
+If you expose Perhe-elämää to the public internet rather than a private network, do
 the first-run setup (next step) **before** opening it up, keep the host
 patched, and consider putting an access layer in front of it.
 
@@ -247,7 +247,7 @@ just `perkele.db` from a running container can miss recent writes. Either:
 
 ```sh
 docker compose stop
-docker run --rm -v perkele_perkele-data:/data -v "$PWD":/backup busybox \
+docker run --rm -v perhe-elamaa_perkele-data:/data -v "$PWD":/backup busybox \
     tar czf /backup/perkele-$(date +%F).tgz -C /data .
 docker compose start
 ```
@@ -255,13 +255,18 @@ docker compose start
 **Or take a hot backup** with SQLite's online backup API, without stopping:
 
 ```sh
-docker run --rm -v perkele_perkele-data:/data -v "$PWD":/backup alpine \
+docker run --rm -v perhe-elamaa_perkele-data:/data -v "$PWD":/backup alpine \
     sh -c 'apk add --no-cache sqlite >/dev/null && \
            sqlite3 /data/perkele.db ".backup /backup/perkele-$(date +%F).db"'
 ```
 
-The volume name is `<compose project>_perkele-data` — `perkele_perkele-data`
-if the compose directory is called `perkele`; check with `docker volume ls`.
+The volume name is `<compose project>_perkele-data`, and the compose project
+name defaults to the directory `compose.yaml` sits in — so a checkout cloned as
+`perhe-elamaa/` uses `perhe-elamaa_perkele-data`, as above. Installs cloned
+before the rename (as `perkele/`) have `perkele_perkele-data`: substitute that,
+and keep the directory — re-cloning or moving `compose.yaml` under a new
+directory name starts the app on a new, empty volume. `docker volume ls | grep
+perkele-data` shows the real name.
 
 To restore, stop the container, replace the contents of the volume with the
 backup (as `perkele.db`, with no stale `-wal`/`-shm` files next to it), and

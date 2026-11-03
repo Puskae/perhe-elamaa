@@ -450,6 +450,11 @@ fn is_online() -> bool {
         .unwrap_or(true)
 }
 
+/// DOM id of the main "Lisää tuote…" input, the target of the ↓ jump button.
+const ADD_INPUT_ID: &str = "grocery-add-input";
+/// The ↓ jump button shows only when more item rows than this are rendered.
+const JUMP_ADD_MIN_ROWS: usize = 8;
+
 #[component]
 pub fn GroceryScreen() -> Element {
     let me = use_resource(api::me);
@@ -947,9 +952,40 @@ pub fn GroceryScreen() -> Element {
     // them to be deletable by the caller (all-or-nothing, see delete_section).
     let may_delete_section = |sec: &[GroceryItem]| sec.iter().all(|i| may_delete(i.added_by));
 
+    // The "jump to add" button only earns its place once the list is long
+    // enough to push the main add form below the fold. Every item renders as
+    // exactly one row in every sort mode (sections + aisle groups + checked
+    // pile in Hyllyt, one flat fold in Aakkoset/Suosikit), so the item count
+    // is the rendered row count.
+    let show_jump_add = items().len() > JUMP_ADD_MIN_ROWS;
+
     rsx! {
-        div { class: "card wide",
+        // `has-jump` reserves room under the last control so the floating ↓
+        // can't cover it at max scroll — only while the button is shown.
+        div { class: if show_jump_add { "card wide has-jump" } else { "card wide" },
             h1 { "Ostoslista" }
+
+            // Floating ↓ (fixed-position, so where it sits in the tree doesn't
+            // matter). `document::eval` runs the JS synchronously inside this
+            // click handler, i.e. still inside the user gesture — which iOS
+            // Safari requires before `focus()` may open the keyboard. Focus
+            // goes first (with preventScroll so the browser doesn't jump), then
+            // the smooth scroll brings the form to mid-screen.
+            if show_jump_add {
+                button {
+                    class: "jump-add",
+                    title: "Lisää tuote",
+                    aria_label: "Lisää tuote",
+                    onclick: move |_| {
+                        document::eval(&format!(
+                            "const el = document.getElementById('{ADD_INPUT_ID}'); \
+                             if (el) {{ el.focus({{preventScroll: true}}); \
+                             el.scrollIntoView({{behavior: 'smooth', block: 'center'}}); }}"
+                        ));
+                    },
+                    "↓"
+                }
+            }
 
             // Sort control: which view of the list is shown below. Persisted
             // per-device via `store::set_sort_mode` so it survives reloads.
@@ -1120,6 +1156,7 @@ pub fn GroceryScreen() -> Element {
 
             div { class: "add-form",
                 input {
+                    id: ADD_INPUT_ID,
                     class: "item-input",
                     placeholder: "Lisää tuote…",
                     value: "{add_name}",

@@ -5,7 +5,7 @@ services:
     #   docker compose up -d --build   → build locally from source (quick fixes)
     # `image:` names the same ref for both, so a local build overwrites the
     # pulled tag and vice versa.
-    image: ghcr.io/puskae/perkele:latest
+    image: ghcr.io/puskae/perhe-elamaa:latest
     build: .
     restart: unless-stopped
     ports:

@@ -1,4 +1,4 @@
-//! Client for the PERKELE API.
+//! Client for the Perhe-elämää API.
 //!
 //! Every call returns `Result<T, String>` where the error string is the
 //! server's human-readable message (from the shared `ErrorResponse`), ready to

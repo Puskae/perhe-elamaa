@@ -1,10 +1,10 @@
-# PERKELE — Family App: Architecture & Build Plan
+# Perhe-elämää — Family App: Architecture & Build Plan
 
 > The original design and phase plan, kept for history. Some parts were not built as described here (e.g. `Authorization: Bearer` token auth, Litestream backups, a `GET /sync?since=` delta endpoint) — see the [README](../README.md) for the current state.
 
 ## Context
 
-PERKELE is a hobby (no-deadline) family coordination app built to learn Rust. Core features: shared calendar, grocery list integrated with recipes, meal planner (the glue: recipes → week plan → grocery list → calendar), reminders/notifications, chores, and a family announcements board. Essential features only — no fluff.
+Perhe-elämää is a hobby (no-deadline) family coordination app built to learn Rust. Core features: shared calendar, grocery list integrated with recipes, meal planner (the glue: recipes → week plan → grocery list → calendar), reminders/notifications, chores, and a family announcements board. Essential features only — no fluff.
 
 Users: one family at first, each member with their own account (parent = admin, kids = limited). Devices: Android, iPhone, iPad, Mac, PC → **web-first PWA**, dedicated native apps later. Runs **self-hosted at home behind Tailscale** initially; the architecture must allow a later pivot to a public SaaS (domain + Cloudflare Tunnel or VPS, token-based API) **without a rewrite** — so multi-tenancy and proper token auth are designed in from day one.
 

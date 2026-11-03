@@ -454,6 +454,25 @@ button.ghost { background: transparent; color: var(--muted); border: 1px solid v
 .add-form input.qty-input { width: 60px; }
 .add-form input.unit-input { width: 60px; }
 .add-form button { margin: 0; padding: 11px 18px; }
+/* Floating "jump to add" ↓ on long grocery lists. Sits 16px above the fixed
+   bottom nav, whose height already includes the home-indicator inset; the
+   right inset clears a landscape notch. Below modal overlays (z-index 50+). */
+.jump-add {
+    position: fixed;
+    right: calc(16px + env(safe-area-inset-right));
+    bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 16px);
+    z-index: 10;
+    width: 48px; height: 48px; margin: 0; padding: 0;
+    border-radius: 50%;
+    background: var(--accent); color: var(--accent-ink);
+    font-size: 1.4rem; line-height: 1;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.45);
+}
+/* Room for the floating ↓ at the bottom of the grocery card: 48px button +
+   16px gap + the card's own 28px. Toggled from Rust rather than `:has()`,
+   which older Safari lacks. */
+.card.has-jump { padding-bottom: 92px; }
 /* Grocery sections (Apteekki, Rautakauppa, …) */
 .grocery-section { margin-top: 22px; }
 .section-header {
@@ -581,13 +600,46 @@ button.danger { background: var(--error); color: var(--accent-ink); }
     border-radius: 999px; padding: 0 6px; font-weight: 700;
 }
 .month-chip { display: block; font-size: 0.7rem; background: rgba(108,140,255,0.18); color: var(--accent); border-radius: 4px; padding: 1px 4px; margin-top: 2px; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-/* Calendar week view */
-.week-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-top: 10px; }
-.week-col { border: 1px solid var(--line); border-radius: 6px; padding: 4px; min-height: 80px; }
-.week-col.today { border-color: var(--accent); background: rgba(108,140,255,0.08); }
-.week-head { font-size: 0.7rem; color: var(--muted); text-align: center; margin-bottom: 4px; }
-.week-chip { display: block; font-size: 0.72rem; background: rgba(108,140,255,0.18); color: var(--ink); border-radius: 4px; padding: 2px 4px; margin-top: 3px; text-decoration: none; }
+/* Calendar week view: hourly time grid. Every row (.week-row) shares one
+   column template — a 22px hour-label column + 7 day columns — so labels,
+   all-day strip and grid line up. minmax(0, 1fr) lets columns shrink below
+   their content, so a long title can't push the page wider on a phone.
+   All three rows reserve a scrollbar gutter, so the body's scrollbar (on
+   desktop) doesn't shift its columns out of line with the header. */
+.week { margin-top: 10px; }
+.week-row { display: grid; grid-template-columns: 22px repeat(7, minmax(0, 1fr)); }
+.week-heads, .week-allday-row { overflow-y: hidden; scrollbar-gutter: stable; }
+.week-head { font-size: 0.7rem; color: var(--muted); text-align: center; padding: 4px 0; white-space: nowrap; overflow: hidden; }
+.week-allday { min-width: 0; display: flex; flex-direction: column; gap: 2px; padding: 0 1px 4px; }
+.week-allday.today-col { background: rgba(108,140,255,0.08); border-radius: 4px 4px 0 0; }
+.week-chip { display: block; font-size: 0.62rem; background: rgba(108,140,255,0.18); color: var(--ink); border-radius: 4px; padding: 1px 3px; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .week-chip.allday { background: rgba(120,200,140,0.2); }
+/* Body height = the month grid's cell area: 6 rows x 64px (.month-cell
+   min-height) + 6 x 2px gaps = 396px, so switching Kuukausi <-> Viikko keeps
+   the card roughly the same height. The 24h grid inside scrolls. */
+.week-body {
+    height: 396px; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable;
+    border: 1px solid var(--line); border-radius: 6px;
+}
+/* 24 hours x 40px (HOUR_PX in week.rs). */
+.week-grid { height: 960px; }
+.week-hours { display: flex; flex-direction: column; }
+.week-hour { height: 40px; flex: none; font-size: 0.6rem; color: var(--muted); text-align: right; padding: 1px 3px 0 0; border-top: 1px solid var(--line); }
+.week-hour:first-child { border-top: none; }
+/* Faint hour lines: a 1px line at the top of every 40px band. */
+.week-day {
+    position: relative; min-width: 0; border-left: 1px solid var(--line);
+    background-image: repeating-linear-gradient(to bottom, var(--line) 0 1px, transparent 1px 40px);
+}
+.week-day.today-col { background-color: rgba(108,140,255,0.08); box-shadow: inset 0 0 0 1px var(--accent); }
+/* Positioned timed event; top/height/left/width come inline from week.rs. */
+.week-event {
+    position: absolute; z-index: 1; overflow: hidden;
+    font-size: 0.6rem; line-height: 1.2; padding: 1px 2px;
+    background: rgba(108,140,255,0.30); border-left: 2px solid var(--accent); border-radius: 3px;
+    color: var(--ink); text-decoration: none; overflow-wrap: anywhere;
+}
+.week-event-time { display: block; font-weight: 600; color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* Planned dinner (meal-plan projection): amber, and not a link — the chip is
    read-only; dinners are edited on the Ruoka screen, not in the calendar. */
 .month-chip.meal, .week-chip.meal { background: rgba(240,170,60,0.20); color: var(--ink); }
@@ -663,6 +715,7 @@ button.danger { background: var(--error); color: var(--accent-ink); }
 }
 .note-text { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .note-editor { min-height: 45vh; font-family: ui-monospace, monospace; resize: vertical; }
+.clear-btn.note-delete { margin-top: 28px; }
 /* Koti hub */
 .home-menu { position: relative; }
 .menu-pop {

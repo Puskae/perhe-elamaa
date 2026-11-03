@@ -3,8 +3,8 @@
 ## Reporting a vulnerability
 
 Please **do not open a public issue** for security problems. Report them privately through
-GitHub's [Report a vulnerability](https://github.com/Puskae/perkele/security/advisories/new)
-form (Security Advisories) on `github.com/Puskae/perkele`.
+GitHub's [Report a vulnerability](https://github.com/Puskae/perhe-elamaa/security/advisories/new)
+form (Security Advisories) on `github.com/Puskae/perhe-elamaa`.
 
 Include what you found, how to reproduce it, and the version or commit you tested against.
 
@@ -14,12 +14,12 @@ Only the latest `main` branch / most recent release is supported. Fixes are not 
 
 ## What to expect
 
-PERKELE is a hobby project maintained by one person. Reports are handled on a best-effort
+Perhe-elämää is a hobby project maintained by one person. Reports are handled on a best-effort
 basis, with no guaranteed response time, and there is no bug bounty.
 
 ## Security model
 
-PERKELE is meant to be self-hosted for a single family, reachable only over HTTPS — behind
+Perhe-elämää is meant to be self-hosted for a single family, reachable only over HTTPS — behind
 Tailscale (`tailscale serve`) or a reverse proxy that terminates TLS. It is not designed to be
 exposed directly to the internet over plain HTTP.
 
