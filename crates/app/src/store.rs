@@ -218,6 +218,21 @@ pub fn set_chores_today(list: &[perkele_shared::chore::DueChore]) {
     write(KEY_CHORES_TODAY, list);
 }
 
+// --- hidden features --------------------------------------------------------
+
+const KEY_HIDDEN_FEATURES: &str = "perkele_hidden_features";
+
+/// The family's hidden-feature set as last seen from the server, so the
+/// bottom bar paints with the right tabs on startup and offline. Nothing
+/// cached → nothing hidden.
+pub fn get_hidden_features() -> perkele_shared::feature::FamilyFeatures {
+    read(KEY_HIDDEN_FEATURES).unwrap_or_default()
+}
+
+pub fn set_hidden_features(ff: &perkele_shared::feature::FamilyFeatures) {
+    write(KEY_HIDDEN_FEATURES, ff);
+}
+
 // --- chat --------------------------------------------------------------------
 
 const KEY_CHAT: &str = "perkele_chat";

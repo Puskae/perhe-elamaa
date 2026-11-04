@@ -282,6 +282,16 @@ pub async fn push_announcement<P: Pusher>(
     author_name: &str,
     body: &str,
 ) -> Result<u32, ApiError> {
+    // Announcements hidden → the post is still stored, just no push.
+    if crate::feature::is_hidden(
+        db,
+        family_id,
+        perkele_shared::feature::Feature::Announcements,
+    )
+    .await?
+    {
+        return Ok(0);
+    }
     let recipients = sqlx::query_scalar!(
         r#"SELECT id AS "id!: i64" FROM users WHERE family_id = ? AND id != ?"#,
         family_id,
@@ -914,6 +924,36 @@ mod tests {
         assert_eq!(log[0].0, fcm("member"));
         assert!(log[0].1.contains("Ilmoitustaulu"));
         assert!(log[0].1.contains("Mikko:"));
+    }
+
+    #[tokio::test]
+    async fn push_announcement_is_skipped_while_announcements_hidden() {
+        use perkele_shared::feature::Feature;
+        let (app, db) = push_app_with_db().await;
+        let admin = setup_admin(&app).await;
+        let member = join_member(&app, &admin).await;
+        subscribe_as(&app, &member, sub_body(&fcm("member"))).await;
+        let sent = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let pusher = test_support::FakePusher {
+            sent: sent.clone(),
+            fail_gone: false,
+        };
+
+        crate::feature::replace_hidden(&db, 1, &[Feature::Announcements])
+            .await
+            .unwrap();
+        let n = push_announcement(&db, &pusher, 1, 1, "Mikko", "Hei")
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+        assert!(sent.lock().await.is_empty());
+
+        // Shown again → pushes resume.
+        crate::feature::replace_hidden(&db, 1, &[]).await.unwrap();
+        let n = push_announcement(&db, &pusher, 1, 1, "Mikko", "Hei")
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     #[tokio::test]

@@ -53,10 +53,11 @@ fn freq_to_key(f: Freq) -> &'static str {
 #[component]
 pub fn EventNewScreen(date: String) -> Element {
     // `date` comes from the route's query param: 'YYYY-MM-DD' when the form
-    // was opened by tapping a day in the month view, "" from the + button.
-    let seed_date = Some(date).filter(|d| d.len() == 10);
+    // was opened by tapping a day in the month view, 'YYYY-MM-DDTHH:MM' from
+    // an hour slot in the week view, "" from the + button.
+    let seed_start = seed_start_from_query(&date);
     rsx! {
-        EventForm { uid: None, seed_date }
+        EventForm { uid: None, seed_start }
     }
 }
 
@@ -72,6 +73,44 @@ pub fn EventEditScreen(uid: String) -> Element {
     };
     rsx! {
         EventForm { uid: Some(master), occ_start: occ }
+    }
+}
+
+/// The new-event start ('YYYY-MM-DDTHH:MM') implied by the route's `date`
+/// query param: a bare date starts at noon, a full date-time is used as is,
+/// anything else (empty, garbage, a hand-edited URL) → `None`, i.e. the
+/// "next full hour" default. Pure, so it is unit-tested natively.
+fn seed_start_from_query(q: &str) -> Option<String> {
+    // Work on bytes: indexing a `&str` by position could panic on a
+    // multi-byte character, a `&[u8]` can't. Checking every position for an
+    // ASCII digit/separator also guarantees the string is pure ASCII.
+    let b = q.as_bytes();
+    let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
+    // Two ASCII digits → their number (only called after `digits` passed).
+    let num = |i: usize| u32::from(b[i] - b'0') * 10 + u32::from(b[i + 1] - b'0');
+    let is_date = b.len() >= 10
+        && digits(0..4)
+        && b[4] == b'-'
+        && digits(5..7)
+        && b[7] == b'-'
+        && digits(8..10)
+        // Month 1..=12, day 1..=31 (not per-month exact; the date input
+        // and server validation catch e.g. Feb 30).
+        && (1..=12).contains(&num(5))
+        && (1..=31).contains(&num(8));
+    match b.len() {
+        10 if is_date => Some(format!("{q}T12:00")),
+        16 if is_date
+            && b[10] == b'T'
+            && digits(11..13)
+            && b[13] == b':'
+            && digits(14..16)
+            && num(11) < 24
+            && num(14) < 60 =>
+        {
+            Some(q.to_owned())
+        }
+        _ => None,
     }
 }
 
@@ -166,10 +205,15 @@ fn apply_to_cache(req: &SaveEventRequest, series_uid: Option<&str>) {
 /// `occ_start` is set when the form was opened from a synthetic occurrence of
 /// a recurring series: `uid` is then the master's uid and the scope picker
 /// decides whether a save/delete touches just that occurrence or the series.
-/// `seed_date` ('YYYY-MM-DD') pre-picks the day for a NEW event (month view
-/// tap); it is ignored when editing.
+/// `seed_start` ('YYYY-MM-DDTHH:MM', see [`seed_start_from_query`]) pre-picks
+/// the start for a NEW event (month-day or week-slot tap); it is ignored when
+/// editing.
 #[component]
-fn EventForm(uid: Option<String>, occ_start: Option<String>, seed_date: Option<String>) -> Element {
+fn EventForm(
+    uid: Option<String>,
+    occ_start: Option<String>,
+    seed_start: Option<String>,
+) -> Element {
     let nav = use_navigator();
     let members = use_resource(api::members);
     let me = use_resource(api::me);
@@ -185,12 +229,9 @@ fn EventForm(uid: Option<String>, occ_start: Option<String>, seed_date: Option<S
     let (seed_start, seed_end) = if editing {
         (String::new(), String::new())
     } else {
-        // A tapped month-view day starts at noon on that day; the + button
-        // keeps the "next full hour today" default.
-        let s = match &seed_date {
-            Some(d) => format!("{d}T12:00"),
-            None => next_full_hour(),
-        };
+        // A tapped month-view day / week-view hour seeds the start; the +
+        // button keeps the "next full hour today" default.
+        let s = seed_start.clone().unwrap_or_else(next_full_hour);
         let e = plus_one_hour(&s);
         (s, e)
     };
@@ -853,6 +894,48 @@ fn EventForm(uid: Option<String>, occ_start: Option<String>, seed_date: Option<S
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seed_date_only_starts_at_noon() {
+        assert_eq!(
+            seed_start_from_query("2026-11-03").as_deref(),
+            Some("2026-11-03T12:00")
+        );
+    }
+
+    #[test]
+    fn seed_datetime_is_used_as_is() {
+        assert_eq!(
+            seed_start_from_query("2026-11-03T07:00").as_deref(),
+            Some("2026-11-03T07:00")
+        );
+    }
+
+    #[test]
+    fn seed_garbage_falls_back_to_default() {
+        for q in [
+            "",
+            "garbage",
+            "2026-11-0x",
+            "2026/11/03",
+            "2026-11-03T7:00",
+            "2026-11-03X07:00",
+            "2026-11-03T25:00",
+            "2026-11-03T07:60",
+            "2026-11-03T07:00:00",
+            "2026-13-01",
+            "2026-00-10T07:00",
+            "2026-05-32T07:00",
+            "ää-ää-ääää",
+        ] {
+            assert_eq!(seed_start_from_query(q), None, "{q:?}");
         }
     }
 }

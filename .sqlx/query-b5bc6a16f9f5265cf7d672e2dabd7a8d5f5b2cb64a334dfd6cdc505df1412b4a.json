@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT feature FROM family_hidden_features WHERE family_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "feature",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "family_hidden_features",
+            "name": "feature"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b5bc6a16f9f5265cf7d672e2dabd7a8d5f5b2cb64a334dfd6cdc505df1412b4a"
+}

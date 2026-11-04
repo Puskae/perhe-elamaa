@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO family_hidden_features (family_id, feature) VALUES (1, 'future'), (1, 'notes')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "c506f304d362d83e1b15b751283f8a67ee5f3e25cf702bd2586c8a35481d61ac"
+}

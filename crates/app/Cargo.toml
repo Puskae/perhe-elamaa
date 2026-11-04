@@ -27,6 +27,14 @@ web-sys = { version = "0.3", features = [
     "PushSubscriptionOptionsInit",
     "Notification",
     "NotificationPermission",
+    # Direct DOM calls (replace `document::eval`, which the CSP blocks)
+    "Document",
+    "Element",
+    "HtmlElement",
+    "FocusOptions",
+    "ScrollIntoViewOptions",
+    "ScrollBehavior",
+    "ScrollLogicalPosition",
 ] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

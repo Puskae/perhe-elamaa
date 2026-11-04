@@ -24,15 +24,22 @@ use time::format_description::well_known::Rfc3339;
 /// Consistency tradeoff (spec): this runs in the handler flow, so an insert
 /// failure surfaces as a 500 — same as sync_log today. On local single-writer
 /// SQLite it effectively never fails, and it keeps the pattern testable.
-pub(crate) async fn record(
-    db: &crate::db::Db,
+///
+/// Generic over the sqlx `Executor`, so callers can pass either the pool
+/// (`&state.db`, its own implicit transaction) or an open transaction
+/// (`&mut *tx`) to make the audit row commit/roll back with the mutation.
+pub(crate) async fn record<'e, E>(
+    db: E,
     family_id: i64,
     actor_user_id: i64,
     entity: &str,
     entity_id: Option<i64>,
     op: &str,
     label: &str,
-) -> Result<(), ApiError> {
+) -> Result<(), ApiError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let created_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .map_err(|_| ApiError::Internal)?;

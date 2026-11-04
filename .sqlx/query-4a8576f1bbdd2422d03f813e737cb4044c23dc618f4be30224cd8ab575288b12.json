@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT entity AS \"entity!\", op AS \"op!\", label AS \"label!\", entity_id\n               FROM audit_log WHERE family_id = 1 ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "name": "entity!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "audit_log",
+            "name": "entity"
+          }
+        }
+      },
+      {
+        "name": "op!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "audit_log",
+            "name": "op"
+          }
+        }
+      },
+      {
+        "name": "label!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "audit_log",
+            "name": "label"
+          }
+        }
+      },
+      {
+        "name": "entity_id",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "audit_log",
+            "name": "entity_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "4a8576f1bbdd2422d03f813e737cb4044c23dc618f4be30224cd8ab575288b12"
+}

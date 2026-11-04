@@ -6,6 +6,7 @@ use crate::api;
 use crate::screens::Route;
 use dioxus::prelude::*;
 use perkele_shared::auth::Role;
+use perkele_shared::feature::{FamilyFeatures, Feature};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
@@ -68,6 +69,7 @@ pub fn MeScreen() -> Element {
                 div { style: "margin-top: 12px;",
                     Link { to: Route::AuditScreen {}, class: "switch", "→ Muutosloki" }
                 }
+                FeaturesPanel {}
                 InvitePanel {}
             }
         }
@@ -312,6 +314,85 @@ fn NotificationsPanel() -> Element {
         }
         if let Some(e) = error() {
             div { class: "error", "{e}" }
+        }
+    }
+}
+
+/// Admin-only panel: which bottom-bar features the whole family sees.
+/// Each toggle PUTs the full new set right away. The checkbox flips
+/// optimistically; a failed save puts the previous set back and shows why.
+#[component]
+fn FeaturesPanel() -> Element {
+    let mut features = crate::screens::use_family_features();
+    let mut busy = use_signal(|| false);
+    let mut error = use_signal(|| Option::<String>::None);
+    // The browser's onLine flag isn't a signal, so reading it alone would
+    // never re-render this panel. Reading NavLayout's `sync_tick` context
+    // signal subscribes the panel to it: every SSE message or reconnect
+    // (which is what happens when the network comes back) bumps the tick,
+    // the panel re-renders, and `is_online()` is read fresh.
+    let sync_tick = use_context::<Signal<u32>>();
+    let _ = sync_tick(); // subscribe
+    let online = crate::screens::calendar::is_online();
+
+    // `move |f, visible|` builds a handler per checkbox below. Signals are
+    // `Copy`, so each closure gets its own handle to the same state.
+    let mut toggle = move |f: Feature, visible: bool| {
+        if busy() {
+            return;
+        }
+        let previous = features();
+        let mut hidden = previous.hidden.clone();
+        hidden.retain(|h| *h != f);
+        if !visible {
+            hidden.push(f);
+        }
+        let next = FamilyFeatures { hidden }.normalized();
+        error.set(None);
+        busy.set(true);
+        features.set(next.clone()); // optimistic
+        spawn(async move {
+            match api::put_family_features(&next).await {
+                Ok(saved) => {
+                    crate::store::set_hidden_features(&saved);
+                    features.set(saved);
+                }
+                Err(e) => {
+                    features.set(previous);
+                    error.set(Some(e));
+                }
+            }
+            busy.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "panel",
+            h2 { "Näkyvät toiminnot" }
+            p { class: "muted small",
+                "Piilotetut toiminnot katoavat koko perheen alapalkista ja Koti-näkymästä, ja niiden ilmoitukset hiljennetään. Tiedot säilyvät."
+            }
+            if let Some(e) = error() {
+                div { class: "error", "{e}" }
+            }
+            for f in Feature::ALL {
+                label {
+                    key: "{f.key()}",
+                    class: "row",
+                    style: "gap:8px;align-items:center;",
+                    input {
+                        r#type: "checkbox",
+                        style: "width:auto;",
+                        checked: !features.read().is_hidden(f),
+                        disabled: busy() || !online,
+                        onchange: move |e| toggle(f, e.checked()),
+                    }
+                    "{f.label_fi()}"
+                }
+            }
+            if !online {
+                div { class: "offline-banner", "Asetusten muuttaminen vaatii verkkoyhteyden." }
+            }
         }
     }
 }

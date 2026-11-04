@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM family_hidden_features WHERE family_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "3f86b0c393e75f48b68d777ab31909f601acaabf34cd958108d2ec143782ac5a"
+}

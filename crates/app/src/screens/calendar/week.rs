@@ -31,8 +31,21 @@ const DAY_MIN: u32 = 24 * 60;
 const MIN_BLOCK_MIN: u32 = 27;
 /// Hour shown at the top of the body after mount / week change.
 const SCROLL_TO_HOUR: u32 = 7;
-/// DOM id of the scrolling body, targeted by the scroll-to-07:00 JS.
+/// DOM id of the scrolling body, targeted by [`scroll_body_to_morning`].
 const BODY_ID: &str = "week-body";
+
+/// Scroll the week body so `SCROLL_TO_HOUR` is at the top. Every step can
+/// fail (no window, element not found) and then silently does nothing.
+///
+/// Returning `Option<()>` lets us use `?` on each fallible lookup: the first
+/// `None` short-circuits out of the function — a no-op, never a panic.
+fn scroll_body_to_morning() -> Option<()> {
+    let el = web_sys::window()?.document()?.get_element_by_id(BODY_ID)?;
+    // `as i32`: the DOM's scrollTop setter takes a signed integer; the value
+    // (7 × 40 = 280) always fits.
+    el.set_scroll_top((SCROLL_TO_HOUR * HOUR_PX) as i32);
+    Some(())
+}
 
 fn hhmm(utc: &str) -> String {
     if utc.len() >= 16 {
@@ -135,6 +148,42 @@ fn assign_lanes(ranges: &[(u32, u32)]) -> Vec<(usize, usize)> {
     out
 }
 
+/// Which event a tap on hour slot `hour` (0–23) of a day column opens.
+///
+/// `ranges` are the day's timed events as `(start, end, uid)`, with the REAL
+/// clipped minute range from [`clip_to_day`] (not the min-height drawn one).
+/// An event counts when its range overlaps the half-open hour
+/// `[hour*60, hour*60 + 60)`: one ending exactly at `hour*60` does not, a
+/// zero-length one sitting at `hour*60` does. Of several, the earliest start
+/// wins. `None` → the slot is free and the tap creates a new event.
+///
+/// The `'a` lifetime says the returned `&str` borrows from `ranges`' uids,
+/// so no String is cloned just to answer the question.
+fn slot_target<'a>(ranges: &[(u32, u32, &'a str)], hour: u32) -> Option<&'a str> {
+    let (hs, he) = (hour * 60, hour * 60 + 60);
+    ranges
+        .iter()
+        .filter(|&&(start, end, _)| start < he && (end > hs || (start == end && start >= hs)))
+        // `min_by_key` keeps the first of equal keys, so ties stay stable.
+        .min_by_key(|&&(start, _, _)| start)
+        .map(|&(_, _, uid)| uid)
+}
+
+/// What each of a day's 24 hour slots opens: `Some(uid)` → that event,
+/// `None` → a new event at that hour. Computed once per render so the slot
+/// click handlers only capture a small owned value.
+fn day_slots(events: &[&Event], day: &str) -> Vec<Option<String>> {
+    let ranges: Vec<(u32, u32, &str)> = events
+        .iter()
+        .filter_map(|e| {
+            clip_to_day(&e.starts_at, &e.ends_at, day).map(|(s, en)| (s, en, e.uid.as_str()))
+        })
+        .collect();
+    (0..24)
+        .map(|h| slot_target(&ranges, h).map(str::to_owned))
+        .collect()
+}
+
 /// One positioned block in a day column.
 struct Block {
     ev: Event,
@@ -154,7 +203,6 @@ fn drawn_range((start, end): (u32, u32)) -> (u32, u32) {
 
 /// Lay out a day's timed events (already filtered to non-all-day).
 fn day_blocks(events: &[&Event], day: &str) -> Vec<Block> {
-    // (event, start, end) for the ones that actually occupy this day.
     // (event, drawn start, drawn end) for the ones that occupy this day.
     let placed: Vec<(&Event, (u32, u32))> = events
         .iter()
@@ -197,14 +245,13 @@ pub fn WeekView(events: Vec<Event>, exdates: Vec<Exdate>) -> Element {
     // Scroll the body so 07:00 is at the top. Effects run after the DOM is
     // updated, so the element exists. Reading `monday()` subscribes the effect
     // to the signal: it re-runs on every week change (and once on mount).
-    // `document::eval` fires the JS immediately; we don't need its result,
-    // so the returned `Eval` handle is simply dropped.
+    //
+    // Direct web-sys DOM calls, NOT `document::eval`: eval is built on
+    // `new Function`, which our CSP blocks, and the resulting JS exception
+    // kills the whole WASM app (see `CSP` in crates/server/src/security.rs).
     use_effect(move || {
         let _ = monday();
-        let top = SCROLL_TO_HOUR * HOUR_PX;
-        document::eval(&format!(
-            "const el = document.getElementById('{BODY_ID}'); if (el) el.scrollTop = {top};"
-        ));
+        scroll_body_to_morning();
     });
 
     // Expand series masters into occurrences over the visible week.
@@ -229,6 +276,8 @@ pub fn WeekView(events: Vec<Event>, exdates: Vec<Exdate>) -> Element {
         all_day: Vec<Event>,
         meal: Option<String>,
         blocks: Vec<Block>,
+        /// Index = hour; see [`day_slots`].
+        slots: Vec<Option<String>>,
     }
     let week: Vec<Day> = days
         .iter()
@@ -253,9 +302,11 @@ pub fn WeekView(events: Vec<Event>, exdates: Vec<Exdate>) -> Element {
                     .find_map(super::meal_label)
                     .map(str::to_owned),
                 blocks: day_blocks(&timed, day),
+                slots: day_slots(&timed, day),
             }
         })
         .collect();
+    let nav = use_navigator();
     let has_strip = week
         .iter()
         .any(|d| !d.all_day.is_empty() || d.meal.is_some());
@@ -319,6 +370,42 @@ pub fn WeekView(events: Vec<Event>, exdates: Vec<Exdate>) -> Element {
                     }
                     for d in week.iter() {
                         div { class: if d.is_today { "week-day today-col" } else { "week-day" },
+                            // Tappable hour slots, drawn first and below the
+                            // event blocks (CSS z-index), so a tap on a block
+                            // hits its Link and a tap elsewhere hits the slot.
+                            // `(0u32..).zip(..)` numbers the slots with a u32 hour
+                            // (enumerate() would give usize).
+                            for (h, target) in (0u32..).zip(d.slots.iter()) {
+                                div {
+                                    // `key` helps Dioxus diff the list cheaply.
+                                    key: "{h}",
+                                    class: "week-slot",
+                                    style: "top:{h * HOUR_PX}px;height:{HOUR_PX}px;",
+                                    // A clickable div isn't a button to screen
+                                    // readers unless we say so.
+                                    role: "button",
+                                    aria_label: if target.is_some() {
+                                        format!("Avaa tapahtuma klo {h:02}")
+                                    } else {
+                                        format!("Uusi tapahtuma klo {h:02}")
+                                    },
+                                    onclick: {
+                                        // The closure must own its data (`move`), so
+                                        // clone this slot's small bits into it.
+                                        let target = target.clone();
+                                        let date = d.date.clone();
+                                        move |_| {
+                                            let route = match &target {
+                                                Some(uid) => Route::EventEditScreen { uid: uid.clone() },
+                                                None => Route::EventNewScreen {
+                                                    date: format!("{date}T{h:02}:00"),
+                                                },
+                                            };
+                                            nav.push(route);
+                                        }
+                                    },
+                                }
+                            }
                             for b in d.blocks.iter() {
                                 Link {
                                     to: Route::EventEditScreen { uid: b.ev.uid.clone() },
@@ -412,6 +499,57 @@ mod tests {
         assert_eq!(drawn_range((600, 605)), (600, 627));
         assert_eq!(drawn_range((1435, 1440)), (1413, 1440));
         assert_eq!(drawn_range((60, 180)), (60, 180));
+    }
+
+    #[test]
+    fn slot_empty_hour_is_none() {
+        assert_eq!(slot_target(&[], 9), None);
+        assert_eq!(slot_target(&[(600, 660, "a")], 9), None);
+    }
+
+    #[test]
+    fn slot_event_filling_the_hour() {
+        assert_eq!(slot_target(&[(840, 900, "a")], 14), Some("a"));
+    }
+
+    #[test]
+    fn slot_event_in_first_half_of_hour() {
+        // 14:00–14:30, tap 14.
+        assert_eq!(slot_target(&[(840, 870, "a")], 14), Some("a"));
+    }
+
+    #[test]
+    fn slot_long_event_covers_middle_hour() {
+        // 13:00–16:00, tap 15.
+        assert_eq!(slot_target(&[(780, 960, "a")], 15), Some("a"));
+    }
+
+    #[test]
+    fn slot_two_events_earlier_start_wins() {
+        // 14:30–15:00 listed first, 14:10–14:20 starts earlier.
+        let r = [(870, 900, "late"), (850, 860, "early")];
+        assert_eq!(slot_target(&r, 14), Some("early"));
+    }
+
+    #[test]
+    fn slot_event_ending_at_hour_start_does_not_count() {
+        // 14:00–15:00, tap 15.
+        assert_eq!(slot_target(&[(840, 900, "a")], 15), None);
+    }
+
+    #[test]
+    fn slot_zero_length_event_at_hour_start_counts() {
+        assert_eq!(slot_target(&[(900, 900, "a")], 15), Some("a"));
+        assert_eq!(slot_target(&[(900, 900, "a")], 14), None);
+    }
+
+    #[test]
+    fn slot_overnight_continuation() {
+        // Prev day 22:00 → 02:00; on the second day it clips to 00:00–02:00.
+        let (s, e) = ("2026-11-03T22:00:00Z", "2026-11-04T02:00:00Z");
+        let (cs, ce) = clip_to_day(s, e, "2026-11-04").unwrap();
+        assert_eq!(slot_target(&[(cs, ce, "a")], 1), Some("a"));
+        assert_eq!(slot_target(&[(cs, ce, "a")], 2), None);
     }
 
     #[test]

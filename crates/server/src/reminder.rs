@@ -4,6 +4,7 @@
 use crate::db::Db;
 use crate::error::ApiError;
 use crate::push::{Pusher, WebPushPusher};
+use perkele_shared::feature::Feature;
 use std::sync::Arc;
 
 /// Reminders more than this late are skipped (spec decision).
@@ -111,6 +112,11 @@ pub async fn scan_once<P: Pusher>(db: &Db, pusher: &P, now: &str) -> Result<u32,
 
     let mut sent_total = 0;
     for family_id in families {
+        // Calendar hidden → mute. Skipped BEFORE the claim below, so nothing
+        // is recorded as sent: re-showing within the late cutoff still fires.
+        if crate::feature::is_hidden(db, family_id, Feature::Calendar).await? {
+            continue;
+        }
         let events = crate::calendar::load_events(db, family_id).await?;
         let exdates = crate::calendar::load_exdates(db, family_id).await?;
         for due in perkele_shared::calendar::due_reminders(&events, &exdates, now, LATE_CUTOFF_MIN)
@@ -191,6 +197,10 @@ pub async fn scan_chores_once<P: Pusher>(db: &Db, pusher: &P, now: &str) -> Resu
 
     let mut sent_total = 0;
     for family_id in families {
+        // Chores hidden → mute, skipped before claiming (same as scan_once).
+        if crate::feature::is_hidden(db, family_id, Feature::Chores).await? {
+            continue;
+        }
         for c in crate::chore::load_chores(db, family_id).await? {
             let Some(remind) = c.remind_at.as_deref().and_then(hm_minutes) else {
                 continue;
@@ -584,6 +594,120 @@ mod tests {
                 .await
                 .unwrap(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn chore_scan_is_muted_while_chores_hidden() {
+        let (app, db) = push_app_with_db().await;
+        let cookie = setup_admin(&app).await;
+        app.clone()
+            .oneshot(req(
+                "POST",
+                "/api/chores",
+                &cookie,
+                Some(chore_body("17:00")),
+            ))
+            .await
+            .unwrap();
+        app.clone()
+            .oneshot(req(
+                "POST",
+                "/api/push/subscribe",
+                &cookie,
+                Some(sub_body(&fcm("dev1"))),
+            ))
+            .await
+            .unwrap();
+        let sent = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let pusher = FakePusher {
+            sent: sent.clone(),
+            fail_gone: false,
+        };
+
+        crate::feature::replace_hidden(&db, 1, &[Feature::Chores])
+            .await
+            .unwrap();
+        assert_eq!(
+            scan_chores_once(&db, &pusher, "2026-07-06T17:05:00Z")
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(sent.lock().await.is_empty());
+
+        // Re-shown inside the window: nothing was claimed, so it fires now.
+        crate::feature::replace_hidden(&db, 1, &[]).await.unwrap();
+        assert_eq!(
+            scan_chores_once(&db, &pusher, "2026-07-06T17:10:00Z")
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn calendar_scan_is_muted_while_calendar_hidden() {
+        let (app, db) = push_app_with_db().await;
+        let cookie = setup_admin(&app).await;
+        app.clone()
+            .oneshot(req(
+                "POST",
+                "/api/calendar/events",
+                &cookie,
+                Some(event(
+                    "h1",
+                    "2026-07-06T18:00:00Z",
+                    "2026-07-06T19:00:00Z",
+                    30,
+                )),
+            ))
+            .await
+            .unwrap();
+        app.clone()
+            .oneshot(req(
+                "POST",
+                "/api/push/subscribe",
+                &cookie,
+                Some(sub_body(&fcm("dev1"))),
+            ))
+            .await
+            .unwrap();
+        let sent = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let pusher = FakePusher {
+            sent: sent.clone(),
+            fail_gone: false,
+        };
+
+        // Calendar hidden: inside the reminder window, yet nothing is sent.
+        crate::feature::replace_hidden(&db, 1, &[Feature::Calendar])
+            .await
+            .unwrap();
+        assert_eq!(
+            scan_once(&db, &pusher, "2026-07-06T17:31:00Z")
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(sent.lock().await.is_empty());
+
+        // Re-shown (only Chores hidden now): the unclaimed reminder fires,
+        // still within the cutoff…
+        crate::feature::replace_hidden(&db, 1, &[Feature::Chores])
+            .await
+            .unwrap();
+        assert_eq!(
+            scan_once(&db, &pusher, "2026-07-06T17:35:00Z")
+                .await
+                .unwrap(),
+            1
+        );
+        // …exactly once.
+        assert_eq!(
+            scan_once(&db, &pusher, "2026-07-06T17:36:00Z")
+                .await
+                .unwrap(),
+            0
         );
     }
 

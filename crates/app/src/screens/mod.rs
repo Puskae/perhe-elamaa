@@ -38,6 +38,14 @@ pub use recipes::{RecipeEditScreen, RecipeNewScreen, RecipeViewScreen, RecipesSc
 use crate::api;
 use dioxus::prelude::*;
 use perkele_shared::auth::UserView;
+use perkele_shared::feature::{FamilyFeatures, Feature};
+
+/// The family's hidden-feature set, provided by `NavLayout` (so every routed
+/// screen can read it). Writing to it — only /me does — re-renders the bottom
+/// bar and Koti immediately.
+pub(crate) fn use_family_features() -> Signal<FamilyFeatures> {
+    use_context::<Signal<FamilyFeatures>>()
+}
 
 /// Client mirror of the server's author-or-admin rule (`grocery::can_modify`
 /// on the server): may `me` delete / overwrite something `created_by` made?
@@ -118,6 +126,29 @@ fn NavLayout() -> Element {
     // the queue is cleared after one pass so a permanent refusal can't wedge
     // it — but the user must SEE that their offline change didn't stick.
     let mut replay_errors = use_signal(Vec::<String>::new);
+
+    // Which features the family admin has hidden. Seeded from the local
+    // cache so the bar paints with the right tabs at once (and offline),
+    // then refreshed from the server on mount and on every sync tick (SSE
+    // reconnect included) so another admin's change shows up live. A failed
+    // fetch (offline, 401) just keeps the cached value.
+    let mut features = use_context_provider(|| Signal::new(crate::store::get_hidden_features()));
+    let fetched_features = use_resource(move || {
+        let _ = sync_tick(); // subscribe
+        async move { api::get_family_features().await }
+    });
+    use_effect(move || {
+        if let Some(Ok(ff)) = fetched_features() {
+            crate::store::set_hidden_features(&ff);
+            // Only write on change: `set` notifies every reader even when
+            // the value is equal, which would re-render nav + Koti per tick.
+            if *features.peek() != ff {
+                features.set(ff);
+            }
+        }
+    });
+    // `shown(f)` reads the signal, so the nav re-renders when it changes.
+    let shown = move |f: Feature| !features.read().is_hidden(f);
 
     #[cfg(target_arch = "wasm32")]
     use_future(move || async move {
@@ -221,54 +252,68 @@ fn NavLayout() -> Element {
                     span { class: "nav-icon", "🏠" }
                     span { class: "nav-label", "Koti" }
                 }
-                Link {
-                    to: Route::GroceryScreen {},
-                    class: "nav-tab",
-                    active_class: "active",
-                    span { class: "nav-icon", "🛒" }
-                    span { class: "nav-label", "Ostokset" }
+                if shown(Feature::Grocery) {
+                    Link {
+                        to: Route::GroceryScreen {},
+                        class: "nav-tab",
+                        active_class: "active",
+                        span { class: "nav-icon", "🛒" }
+                        span { class: "nav-label", "Ostokset" }
+                    }
                 }
-                Link {
-                    to: Route::CalendarScreen {},
-                    class: "nav-tab",
-                    active_class: "active",
-                    span { class: "nav-icon", "📅" }
-                    span { class: "nav-label", "Kalenteri" }
+                if shown(Feature::Calendar) {
+                    Link {
+                        to: Route::CalendarScreen {},
+                        class: "nav-tab",
+                        active_class: "active",
+                        span { class: "nav-icon", "📅" }
+                        span { class: "nav-label", "Kalenteri" }
+                    }
                 }
-                Link {
-                    to: Route::ChoresScreen {},
-                    class: "nav-tab",
-                    active_class: "active",
-                    span { class: "nav-icon", "🧹" }
-                    span { class: "nav-label", "Kotityöt" }
+                if shown(Feature::Chores) {
+                    Link {
+                        to: Route::ChoresScreen {},
+                        class: "nav-tab",
+                        active_class: "active",
+                        span { class: "nav-icon", "🧹" }
+                        span { class: "nav-label", "Kotityöt" }
+                    }
                 }
-                Link {
-                    to: Route::RecipesScreen {},
-                    class: "nav-tab",
-                    active_class: "active",
-                    span { class: "nav-icon", "🍲" }
-                    span { class: "nav-label", "Ruoka" }
+                if shown(Feature::Food) {
+                    Link {
+                        to: Route::RecipesScreen {},
+                        class: "nav-tab",
+                        active_class: "active",
+                        span { class: "nav-icon", "🍲" }
+                        span { class: "nav-label", "Ruoka" }
+                    }
                 }
-                Link {
-                    to: Route::NotesScreen {},
-                    class: "nav-tab",
-                    active_class: "active",
-                    span { class: "nav-icon", "📝" }
-                    span { class: "nav-label", "Muistiot" }
+                if shown(Feature::Notes) {
+                    Link {
+                        to: Route::NotesScreen {},
+                        class: "nav-tab",
+                        active_class: "active",
+                        span { class: "nav-icon", "📝" }
+                        span { class: "nav-label", "Muistiot" }
+                    }
                 }
                 // Ilmoitustaulu is reached from the Koti hub card and Minä
                 // from the hub's ⋯ menu — neither spends a tab anymore.
-                Link {
-                    to: Route::ChatScreen {},
-                    class: "nav-tab",
-                    active_class: "active",
-                    span { class: "nav-icon",
-                        "💬"
-                        if unread_count > 0 {
-                            span { class: "nav-badge", "{unread_count}" }
+                // Koti is never hideable; every other tab is admin-hideable.
+                // `.nav-tab { flex: 1 }` lets the remaining tabs share the bar.
+                if shown(Feature::Chat) {
+                    Link {
+                        to: Route::ChatScreen {},
+                        class: "nav-tab",
+                        active_class: "active",
+                        span { class: "nav-icon",
+                            "💬"
+                            if unread_count > 0 {
+                                span { class: "nav-badge", "{unread_count}" }
+                            }
                         }
+                        span { class: "nav-label", "Chatti" }
                     }
-                    span { class: "nav-label", "Chatti" }
                 }
             }
         }
@@ -632,6 +677,18 @@ button.danger { background: var(--error); color: var(--accent-ink); }
     background-image: repeating-linear-gradient(to bottom, var(--line) 0 1px, transparent 1px 40px);
 }
 .week-day.today-col { background-color: rgba(108,140,255,0.08); box-shadow: inset 0 0 0 1px var(--accent); }
+/* Tappable hour slot (one per hour per day): opens the event in that hour or
+   a new-event form at that hour. Transparent and borderless so the gradient
+   hour lines show through un-doubled; sits below .week-event (z-index 1). */
+.week-slot {
+    position: absolute; left: 0; right: 0; z-index: 0; cursor: pointer;
+    background: transparent; -webkit-tap-highlight-color: transparent;
+}
+/* Hover only on real pointers: touch would leave it stuck after a tap. */
+@media (hover: hover) {
+    .week-slot:hover { background: rgba(108,140,255,0.08); }
+}
+.week-slot:active { background: rgba(108,140,255,0.16); }
 /* Positioned timed event; top/height/left/width come inline from week.rs. */
 .week-event {
     position: absolute; z-index: 1; overflow: hidden;

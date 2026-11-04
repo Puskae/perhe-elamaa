@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// The valid `entity` values, in the order they appear in the filter chips.
 /// Kept here so the frontend renders the filter list from the same source the
 /// server writes.
-pub const ENTITY_KINDS: [&str; 8] = [
+pub const ENTITY_KINDS: [&str; 9] = [
     "calendar_event",
     "grocery_item",
     "recipe",
@@ -17,6 +17,7 @@ pub const ENTITY_KINDS: [&str; 8] = [
     "announcement",
     "aisle",
     "note",
+    "feature", // admin's "Näkyvät toiminnot" changes (no entity id)
 ];
 
 /// Default page size for `GET /api/audit` when `limit` is absent.
@@ -60,6 +61,6 @@ mod tests {
 
     #[test]
     fn entity_kinds_covers_all_domains() {
-        assert_eq!(ENTITY_KINDS.len(), 8);
+        assert_eq!(ENTITY_KINDS.len(), 9);
     }
 }

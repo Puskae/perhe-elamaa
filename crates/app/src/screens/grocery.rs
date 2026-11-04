@@ -452,6 +452,43 @@ fn is_online() -> bool {
 
 /// DOM id of the main "Lisää tuote…" input, the target of the ↓ jump button.
 const ADD_INPUT_ID: &str = "grocery-add-input";
+
+/// Focus the main add input and smooth-scroll it to mid-screen (the floating
+/// ↓ button). Every fallible step silently no-ops — never panics.
+///
+/// `Option<()>` + `?` short-circuits on the first missing piece (no window,
+/// no element, not an HTML element).
+fn focus_add_input() -> Option<()> {
+    // `JsCast` brings `dyn_ref` into scope: a checked downcast between JS
+    // types, like `instanceof`. `get_element_by_id` returns a plain `Element`,
+    // but `focus()` lives on `HtmlElement`.
+    use wasm_bindgen::JsCast;
+    use web_sys::{
+        FocusOptions, HtmlElement, ScrollBehavior, ScrollIntoViewOptions, ScrollLogicalPosition,
+    };
+
+    let el = web_sys::window()?
+        .document()?
+        .get_element_by_id(ADD_INPUT_ID)?;
+
+    // `dyn_ref` borrows `el` as an `HtmlElement` (returns `None` if it isn't
+    // one), so `el` stays usable for the scroll call below.
+    let html: &HtmlElement = el.dyn_ref::<HtmlElement>()?;
+    let focus_opts = FocusOptions::new();
+    focus_opts.set_prevent_scroll(true);
+    // Older browsers may reject the options object; fall back to plain focus.
+    // Both return `Result`s we deliberately ignore (`let _ =`).
+    if html.focus_with_options(&focus_opts).is_err() {
+        let _ = html.focus();
+    }
+
+    let scroll_opts = ScrollIntoViewOptions::new();
+    scroll_opts.set_behavior(ScrollBehavior::Smooth);
+    scroll_opts.set_block(ScrollLogicalPosition::Center);
+    el.scroll_into_view_with_scroll_into_view_options(&scroll_opts);
+    Some(())
+}
+
 /// The ↓ jump button shows only when more item rows than this are rendered.
 const JUMP_ADD_MIN_ROWS: usize = 8;
 
@@ -966,22 +1003,20 @@ pub fn GroceryScreen() -> Element {
             h1 { "Ostoslista" }
 
             // Floating ↓ (fixed-position, so where it sits in the tree doesn't
-            // matter). `document::eval` runs the JS synchronously inside this
-            // click handler, i.e. still inside the user gesture — which iOS
-            // Safari requires before `focus()` may open the keyboard. Focus
-            // goes first (with preventScroll so the browser doesn't jump), then
-            // the smooth scroll brings the form to mid-screen.
+            // matter). The web-sys calls run synchronously inside this click
+            // handler, i.e. still inside the user gesture — which iOS Safari
+            // requires before `focus()` may open the keyboard. Focus goes
+            // first (with preventScroll so the browser doesn't jump), then the
+            // smooth scroll brings the form to mid-screen. Never use
+            // `document::eval` here: our CSP blocks it and the exception kills
+            // the whole WASM app (see crates/server/src/security.rs).
             if show_jump_add {
                 button {
                     class: "jump-add",
                     title: "Lisää tuote",
                     aria_label: "Lisää tuote",
                     onclick: move |_| {
-                        document::eval(&format!(
-                            "const el = document.getElementById('{ADD_INPUT_ID}'); \
-                             if (el) {{ el.focus({{preventScroll: true}}); \
-                             el.scrollIntoView({{behavior: 'smooth', block: 'center'}}); }}"
-                        ));
+                        focus_add_input();
                     },
                     "↓"
                 }

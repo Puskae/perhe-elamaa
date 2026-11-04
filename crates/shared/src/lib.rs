@@ -14,6 +14,7 @@ pub mod chat;
 pub mod chore;
 pub mod client_report;
 pub mod dates;
+pub mod feature;
 pub mod grocery;
 pub mod note;
 pub mod push;

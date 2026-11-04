@@ -18,6 +18,7 @@ mod chore;
 mod chore_stats;
 mod db;
 mod error;
+mod feature;
 mod grocery;
 mod note;
 mod push;
@@ -125,7 +126,8 @@ fn router(
         .merge(chore::router())
         .merge(chore_stats::router())
         .merge(note::router())
-        .merge(audit::router());
+        .merge(audit::router())
+        .merge(feature::router());
 
     let cookie_secure = state.cookie_secure;
     let app = Router::new()

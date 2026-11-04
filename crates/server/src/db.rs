@@ -43,7 +43,23 @@ pub async fn connect(url: &str) -> Result<Db, sqlx::Error> {
 /// compile time and bakes the SQL into the binary, so the deployed server
 /// needs no migration files on disk.
 pub async fn run_migrations(pool: &Db) -> Result<(), sqlx::Error> {
-    sqlx::migrate!("./migrations").run(pool).await?;
+    // `migrate!` expands to a `Migrator` value, so we can tweak it before running.
+    let mut migrator = sqlx::migrate!("./migrations");
+    // Tolerate migrations in the DB that this binary doesn't know about. By
+    // default sqlx refuses to start when a NEWER image already applied a
+    // migration (e.g. 0016) and you roll back to an older one — this makes
+    // that rollback possible (from this release on). Caveats:
+    // - Rollback only works if the newer migrations are strictly additive
+    //   (new tables/columns the older code ignores) AND every new NOT NULL
+    //   column has a DEFAULT — otherwise the older code's INSERTs, which
+    //   don't name that column, fail at runtime.
+    // - It doesn't help images older than 1.0.6: they don't have this flag
+    //   and still refuse to start on unknown migrations.
+    // - Only *unknown* versions are ignored: a checksum mismatch on a
+    //   version this binary knows (an edited, already-applied migration)
+    //   is still caught and still aborts startup.
+    migrator.set_ignore_missing(true);
+    migrator.run(pool).await?;
     Ok(())
 }
 

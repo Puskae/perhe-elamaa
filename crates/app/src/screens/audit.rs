@@ -29,12 +29,24 @@ fn noun(entity: &str) -> &'static str {
         "announcement" => "tiedotteen",
         "aisle" => "hyllyn",
         "note" => "muistion",
+        "feature" => "näkyviä toimintoja",
         _ => "kohteen",
     }
 }
 
 /// e.g. "Poisti ostoksen 'Maito'".
 pub(crate) fn sentence(entry: &AuditEntry) -> String {
+    // A feature change has no single named item: its label is already a
+    // summary ("Piilotettu: Ruoka; Näytetty: Chatti"), so it follows a colon
+    // instead of being quoted like a name.
+    if entry.entity == "feature" {
+        return format!(
+            "{} {}: {}",
+            verb(&entry.op),
+            noun(&entry.entity),
+            entry.label
+        );
+    }
     format!(
         "{} {} '{}'",
         verb(&entry.op),
@@ -55,6 +67,7 @@ fn entity_label(kind: &str) -> &str {
         "announcement" => "Tiedotteet",
         "aisle" => "Hyllyt",
         "note" => "Muistiot",
+        "feature" => "Toiminnot",
         _ => kind,
     }
 }
@@ -235,5 +248,18 @@ mod tests {
             sentence(&e("update", "dinner", "2026-07-24")),
             "Muutti päivällisen '2026-07-24'"
         );
+    }
+
+    #[test]
+    fn feature_change_reads_as_a_summary() {
+        assert_eq!(
+            sentence(&e(
+                "update",
+                "feature",
+                "Piilotettu: Ruoka; Näytetty: Chatti"
+            )),
+            "Muutti näkyviä toimintoja: Piilotettu: Ruoka; Näytetty: Chatti"
+        );
+        assert_eq!(entity_label("feature"), "Toiminnot");
     }
 }

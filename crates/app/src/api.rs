@@ -21,6 +21,7 @@ use perkele_shared::chat::{
     ChatMessage, ChatPage, MarkReadRequest, SendMessageRequest, ToggleReactionRequest,
 };
 use perkele_shared::chore::{Chore, ChoreStats, DueChore, SaveChoreRequest};
+use perkele_shared::feature::FamilyFeatures;
 use perkele_shared::grocery::{
     AddItemRequest, EditItemRequest, GroceryItem, SetCheckedRequest, SetCheckedResponse,
     SyncResponse,
@@ -148,6 +149,17 @@ pub async fn redeem(req: RedeemRequest) -> Result<UserView, String> {
 
 pub async fn members() -> Result<Vec<UserView>, String> {
     get("/api/family/members").await
+}
+
+/// Which bottom-bar features the family has hidden (any member may read it).
+pub async fn get_family_features() -> Result<FamilyFeatures, String> {
+    get("/api/family/features").await
+}
+
+/// Replace the hidden set (admin only; others get the server's 403 message).
+/// The server answers with the stored, normalized set.
+pub async fn put_family_features(ff: &FamilyFeatures) -> Result<FamilyFeatures, String> {
+    put_json("/api/family/features", ff).await
 }
 
 pub async fn create_invite(role: Role) -> Result<InviteResponse, String> {

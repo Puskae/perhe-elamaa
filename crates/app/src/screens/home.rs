@@ -15,6 +15,7 @@ use dioxus::prelude::*;
 use perkele_shared::announcement::Announcement;
 use perkele_shared::calendar::{Event, Exdate, expand_events, starts_within};
 use perkele_shared::chore::DueChore;
+use perkele_shared::feature::Feature;
 use perkele_shared::grocery::GroceryItem;
 use std::collections::BTreeMap;
 
@@ -24,6 +25,11 @@ pub fn HomeScreen() -> Element {
     // instead of spending a nav tab (Minä is visited a few times a year).
     let mut menu_open = use_signal(|| false);
     let mut refresh = use_context::<Signal<u32>>(); // app-wide sync tick
+    // Admin-hidden features: their cards are skipped below. The fetches stay
+    // unconditional (hooks must run in the same order every render) — only
+    // the rendering is gated.
+    let features = super::use_family_features();
+    let shown = move |f: Feature| !features.read().is_hidden(f);
 
     // --- 📌 Ilmoitustaulu ---------------------------------------------------
     let mut anns: Signal<Vec<Announcement>> = use_signal(store::get_announcements);
@@ -196,93 +202,44 @@ pub fn HomeScreen() -> Element {
                 }
             }
 
-            // 📌 Ilmoitustaulu
-            Link { to: Route::AnnouncementsScreen {}, class: "hub-card",
-                div { class: "hub-title",
-                    span { "📌 Ilmoitustaulu" }
-                    span { "Näytä kaikki →" }
-                }
-                if pinned.is_empty() {
-                    p { class: "muted", style: "margin:0;", "Ei ilmoituksia." }
-                }
-                for a in pinned {
-                    div { class: "hub-row",
-                        span { class: "muted", "{stamp(&a.created_at)}" }
-                        span { style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;", "{a.body}" }
+            if shown(Feature::Announcements) {
+                // 📌 Ilmoitustaulu
+                Link { to: Route::AnnouncementsScreen {}, class: "hub-card",
+                    div { class: "hub-title",
+                        span { "📌 Ilmoitustaulu" }
+                        span { "Näytä kaikki →" }
                     }
-                }
-            }
-
-            // 📅 Tulevat menot
-            Link { to: Route::CalendarScreen {}, class: "hub-card",
-                div { class: "hub-title",
-                    span { "📅 Tulevat menot" }
-                    span { "→ Kalenteri" }
-                }
-                if by_day.is_empty() {
-                    p { class: "muted", style: "margin:0;", "Ei tapahtumia seuraavaan 7 päivään." }
-                }
-                for (day , evs) in by_day {
-                    div { class: "hub-row",
-                        span { class: "muted", "{weekday_fi(&day)} {day_label(&day)}" }
-                        span {
-                            for (i , ev) in evs.iter().enumerate() {
-                                if i > 0 {
-                                    " · "
-                                }
-                                "{time_label(ev)} {ev.title}"
-                            }
+                    if pinned.is_empty() {
+                        p { class: "muted", style: "margin:0;", "Ei ilmoituksia." }
+                    }
+                    for a in pinned {
+                        div { class: "hub-row",
+                            span { class: "muted", "{stamp(&a.created_at)}" }
+                            span { style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;", "{a.body}" }
                         }
                     }
                 }
             }
 
-            // 🍽 Päivällinen
-            Link { to: Route::MealPlanScreen {}, class: "hub-card",
-                div { class: "hub-title",
-                    span { "🍽 Päivällinen" }
-                    span { "→ Ruokalista" }
-                }
-                div { class: "hub-row",
-                    span { class: "muted", "Tänään" }
-                    span { {dinner_today.unwrap_or_else(|| "Ei suunniteltu.".to_owned())} }
-                }
-                if let Some(m) = dinner_tomorrow {
-                    div { class: "hub-row",
-                        span { class: "muted", "Huomenna" }
-                        span { "{m}" }
+            if shown(Feature::Calendar) {
+                // 📅 Tulevat menot
+                Link { to: Route::CalendarScreen {}, class: "hub-card",
+                    div { class: "hub-title",
+                        span { "📅 Tulevat menot" }
+                        span { "→ Kalenteri" }
                     }
-                }
-            }
-
-            // 🧹 Minun hommat tänään — tap-to-complete right here on the hub.
-            // (A div, not a Link: the chore cards inside are buttons, and
-            // interactive elements can't nest inside an anchor.)
-            div { class: "hub-card",
-                div { class: "hub-title",
-                    span { "🧹 Minun hommat tänään" }
-                    Link {
-                        to: Route::ChoresScreen {},
-                        style: "color:inherit;text-decoration:none;",
-                        "→ Kotityöt"
+                    if by_day.is_empty() {
+                        p { class: "muted", style: "margin:0;", "Ei tapahtumia seuraavaan 7 päivään." }
                     }
-                }
-                if mine.is_empty() {
-                    p { class: "muted", style: "margin:0;", "Ei kotitöitä tänään. 🎉" }
-                }
-                div { class: "chore-cards",
-                    for c in mine {
-                        {
-                            let done = c.done_by.is_some();
-                            let can_toggle = may_toggle(&c);
-                            let c2 = c.clone();
-                            rsx! {
-                                button {
-                                    class: if done { "chore-card done" } else { "chore-card" },
-                                    disabled: !can_toggle,
-                                    onclick: move |_| toggle(c2.clone()),
-                                    span { class: "chore-check", if done { "✅" } else { "⬜" } }
-                                    span { class: "chore-title", "{c.title}" }
+                    for (day , evs) in by_day {
+                        div { class: "hub-row",
+                            span { class: "muted", "{weekday_fi(&day)} {day_label(&day)}" }
+                            span {
+                                for (i , ev) in evs.iter().enumerate() {
+                                    if i > 0 {
+                                        " · "
+                                    }
+                                    "{time_label(ev)} {ev.title}"
                                 }
                             }
                         }
@@ -290,29 +247,90 @@ pub fn HomeScreen() -> Element {
                 }
             }
 
-            // 💬 Chatti
-            Link { to: Route::ChatScreen {}, class: "hub-card",
-                div { class: "hub-title",
-                    span { "💬 Chatti{unread_label}" }
-                    span { "→ Chatti" }
-                }
-                if let Some(m) = latest {
-                    div { class: "hub-row",
-                        span { class: "muted", "{m.author_name}:" }
-                        span { style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;", "{m.body}" }
+            if shown(Feature::Food) {
+                // 🍽 Päivällinen
+                Link { to: Route::MealPlanScreen {}, class: "hub-card",
+                    div { class: "hub-title",
+                        span { "🍽 Päivällinen" }
+                        span { "→ Ruokalista" }
                     }
-                } else {
-                    p { class: "muted", style: "margin:0;", "Ei viestejä vielä." }
+                    div { class: "hub-row",
+                        span { class: "muted", "Tänään" }
+                        span { {dinner_today.unwrap_or_else(|| "Ei suunniteltu.".to_owned())} }
+                    }
+                    if let Some(m) = dinner_tomorrow {
+                        div { class: "hub-row",
+                            span { class: "muted", "Huomenna" }
+                            span { "{m}" }
+                        }
+                    }
                 }
             }
 
-            // 🛒 Ostoslista
-            Link { to: Route::GroceryScreen {}, class: "hub-card",
-                div { class: "hub-title",
-                    span { "🛒 Ostoslista" }
-                    span { "→ Ostokset" }
+            if shown(Feature::Chores) {
+                // 🧹 Minun hommat tänään — tap-to-complete right here on the hub.
+                // (A div, not a Link: the chore cards inside are buttons, and
+                // interactive elements can't nest inside an anchor.)
+                div { class: "hub-card",
+                    div { class: "hub-title",
+                        span { "🧹 Minun hommat tänään" }
+                        Link {
+                            to: Route::ChoresScreen {},
+                            style: "color:inherit;text-decoration:none;",
+                            "→ Kotityöt"
+                        }
+                    }
+                    if mine.is_empty() {
+                        p { class: "muted", style: "margin:0;", "Ei kotitöitä tänään. 🎉" }
+                    }
+                    div { class: "chore-cards",
+                        for c in mine {
+                            {
+                                let done = c.done_by.is_some();
+                                let can_toggle = may_toggle(&c);
+                                let c2 = c.clone();
+                                rsx! {
+                                    button {
+                                        class: if done { "chore-card done" } else { "chore-card" },
+                                        disabled: !can_toggle,
+                                        onclick: move |_| toggle(c2.clone()),
+                                        span { class: "chore-check", if done { "✅" } else { "⬜" } }
+                                        span { class: "chore-title", "{c.title}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-                p { class: "muted", style: "margin:0;", "{grocery_label}" }
+            }
+
+            if shown(Feature::Chat) {
+                // 💬 Chatti
+                Link { to: Route::ChatScreen {}, class: "hub-card",
+                    div { class: "hub-title",
+                        span { "💬 Chatti{unread_label}" }
+                        span { "→ Chatti" }
+                    }
+                    if let Some(m) = latest {
+                        div { class: "hub-row",
+                            span { class: "muted", "{m.author_name}:" }
+                            span { style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;", "{m.body}" }
+                        }
+                    } else {
+                        p { class: "muted", style: "margin:0;", "Ei viestejä vielä." }
+                    }
+                }
+            }
+
+            if shown(Feature::Grocery) {
+                // 🛒 Ostoslista
+                Link { to: Route::GroceryScreen {}, class: "hub-card",
+                    div { class: "hub-title",
+                        span { "🛒 Ostoslista" }
+                        span { "→ Ostokset" }
+                    }
+                    p { class: "muted", style: "margin:0;", "{grocery_label}" }
+                }
             }
         }
     }
