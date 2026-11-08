@@ -23,7 +23,7 @@ argon2 = "0.5"
 # which is what provides `OsRng`. Depending on it directly with that feature
 # enables it via Cargo's feature unification.
 password-hash = { version = "0.5", features = ["getrandom"] }
-sha2 = "0.10"
+sha2 = "0.11"
 base64 = "0.23"
 hex = "0.4"
 tower_governor = "0.8"
