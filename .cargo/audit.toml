@@ -16,4 +16,12 @@ ignore = [
     # web-push/jwt-simple release on elliptic-curve 0.14.
     # https://rustsec.org/advisories/RUSTSEC-2026-0387
     "RUSTSEC-2026-0387",
+    # SQLite < 3.54 can leak uninitialized page-cache memory when opening a DB
+    # together with a crafted -wal file of a different page size. Bundled via
+    # sqlx-sqlite 0.9 -> libsqlite3-sys 0.37; the fix (>=0.39) is outside every
+    # released sqlx-sqlite's range (<0.38). Needs a local attacker to plant both
+    # files; the server only ever opens its own DB inside its own volume. Drop
+    # this once sqlx releases on libsqlite3-sys 0.39.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0459
+    "RUSTSEC-2026-0459",
 ]
