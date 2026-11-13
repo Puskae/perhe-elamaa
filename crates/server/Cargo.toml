@@ -31,7 +31,7 @@ web-push = { workspace = true }
 # Named directly only to configure timeouts on the HTTP client web-push uses
 # (it is web-push's default transport). Keep the version in step with the one
 # web-push pulls in so Cargo unifies them into a single copy.
-isahc = "1.8"
+isahc = "2.0"
 # Constant-time comparison for the setup token (already in the tree via
 # jwt-simple's crypto deps; this just makes it a direct dependency).
 subtle = "2.6"
