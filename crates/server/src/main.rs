@@ -160,22 +160,30 @@ fn main() {
     let dsn = std::env::var("PERKELE_SENTRY_DSN")
         .ok()
         .filter(|d| !d.trim().is_empty());
-    let _sentry = sentry::init(sentry::ClientOptions {
-        dsn: dsn.and_then(|d| match d.parse() {
-            Ok(dsn) => Some(dsn),
-            Err(e) => {
-                eprintln!("ignoring invalid PERKELE_SENTRY_DSN: {e}");
-                None
-            }
-        }),
-        release: sentry::release_name!(),
-        ..Default::default()
+    // `ClientOptions` is `#[non_exhaustive]` since sentry 0.49, so it can't be
+    // built with a struct literal (not even with `..Default::default()`)
+    // outside its crate: start from the default and assign fields instead.
+    let mut sentry_opts = sentry::ClientOptions::default();
+    sentry_opts.dsn = dsn.and_then(|d| match d.parse() {
+        Ok(dsn) => Some(dsn),
+        Err(e) => {
+            eprintln!("ignoring invalid PERKELE_SENTRY_DSN: {e}");
+            None
+        }
     });
+    sentry_opts.release = sentry::release_name!();
+    let _sentry = sentry::init(sentry_opts);
 
     // Layered subscriber instead of the plain fmt() builder: the Sentry layer
     // rides alongside the console output. With it, every `tracing::error!`
     // becomes a GlitchTip event and warn/info lines become breadcrumbs.
-    use tracing_subscriber::layer::SubscriberExt;
+    //
+    // sentry 0.49 split the old combined `layer()` into per-purpose layers that
+    // don't filter by level themselves, so each gets an explicit filter here to
+    // keep the old split: ERROR -> event, WARN/INFO -> breadcrumb.
+    use sentry::integrations::tracing::{BreadcrumbLayer, ErrorLayer};
+    use tracing_subscriber::filter::{LevelFilter, filter_fn};
+    use tracing_subscriber::layer::{Layer, SubscriberExt};
     use tracing_subscriber::util::SubscriberInitExt;
     tracing_subscriber::registry()
         .with(
@@ -183,7 +191,10 @@ fn main() {
                 .unwrap_or_else(|_| "info,tower_http=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
-        .with(sentry::integrations::tracing::layer())
+        .with(ErrorLayer::new().with_filter(LevelFilter::ERROR))
+        .with(BreadcrumbLayer::new().with_filter(filter_fn(|meta| {
+            matches!(*meta.level(), tracing::Level::WARN | tracing::Level::INFO)
+        })))
         .init();
 
     tokio::runtime::Builder::new_multi_thread()
