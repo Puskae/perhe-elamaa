@@ -41,7 +41,7 @@ serde_json = { workspace = true }
 # Error reporting to GlitchTip (speaks the Sentry protocol). default-features
 # off to swap native-tls for rustls — keeps the later Docker image free of
 # OpenSSL. The `tracing` feature bridges tracing::error! events into Sentry.
-sentry = { version = "0.48", default-features = false, features = [
+sentry = { version = "0.49", default-features = false, features = [
     "backtrace",
     "contexts",
     "panic",
