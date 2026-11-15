@@ -18,7 +18,7 @@ sqlx = { workspace = true }
 time = { workspace = true }
 axum-extra = { version = "0.12", features = ["cookie"] }
 serde = { workspace = true }
-argon2 = "0.5"
+argon2 = "0.6"
 # argon2 re-exports password-hash but doesn't forward its `getrandom` feature,
 # which is what provides `OsRng`. Depending on it directly with that feature
 # enables it via Cargo's feature unification.
