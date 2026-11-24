@@ -147,12 +147,7 @@ pub async fn scan_once<P: Pusher>(db: &Db, pusher: &P, now: &str) -> Result<u32,
             } else {
                 due.attendee_ids.clone()
             };
-            // All-day starts are a nominal 00:00 — "Alkaa klo 00:00" would mislead.
-            let body = if due.all_day {
-                "Koko päivän tapahtuma".to_owned()
-            } else {
-                format!("Alkaa klo {}", &due.occ_start[11..16])
-            };
+            let body = reminder_body(&due.occ_start, due.all_day, now);
             let payload = serde_json::json!({
                 "title": due.title,
                 "body": body,
@@ -165,6 +160,56 @@ pub async fn scan_once<P: Pusher>(db: &Db, pusher: &P, now: &str) -> Result<u32,
         }
     }
     Ok(sent_total)
+}
+
+/// The notification text under the event title: WHEN the occurrence starts,
+/// relative to `now` (the moment the reminder fires).
+///
+/// Always carries the date ("ti 7.7."), plus "Tänään"/"Huomenna" when that
+/// applies. The date is what keeps a day-ahead reminder unambiguous — and it
+/// stays right even if the notification is read hours later from the tray,
+/// when "Huomenna" alone would have gone stale. Times use the Finnish style
+/// `14.00`. All-day occurrences start at a nominal 00:00, so they get no time.
+///
+/// Both arguments are floating local `YYYY-MM-DDTHH:MM:SSZ` strings (the
+/// scheduler's own format). Never panics: on malformed input it degrades to
+/// less detail rather than taking the scheduler tick down.
+fn reminder_body(occ_start: &str, all_day: bool, now: &str) -> String {
+    // `chrono::Datelike`/`Timelike` are traits: importing them is what makes
+    // `.weekday()`, `.day()`, `.hour()` etc. callable on the parsed value.
+    use chrono::{Datelike as _, NaiveDateTime, Timelike as _};
+    const FORMAT: &str = "%Y-%m-%dT%H:%M:%SZ";
+
+    let Ok(start) = NaiveDateTime::parse_from_str(occ_start, FORMAT) else {
+        return "Tapahtuma alkaa pian".to_owned();
+    };
+    // Finnish weekday abbreviations, Monday first — `num_days_from_monday()`
+    // is 0 for Monday, so it indexes straight into this array.
+    const WEEKDAYS: [&str; 7] = ["ma", "ti", "ke", "to", "pe", "la", "su"];
+    let date = format!(
+        "{} {}.{}.",
+        WEEKDAYS[start.weekday().num_days_from_monday() as usize],
+        start.day(),
+        start.month()
+    );
+
+    // Whole calendar days between the two dates (not 24 h spans): 23:50 →
+    // 00:30 is "tomorrow" even though it's under an hour away.
+    let relative = NaiveDateTime::parse_from_str(now, FORMAT)
+        .ok()
+        .map(|now| (start.date() - now.date()).num_days());
+    let when = match relative {
+        Some(0) => format!("Tänään {date}"),
+        Some(1) => format!("Huomenna {date}"),
+        _ => date,
+    };
+
+    if all_day {
+        format!("{when}, koko päivän")
+    } else {
+        // `{:02}` zero-pads minutes ("9.05"); hours stay unpadded ("9.30").
+        format!("{when} klo {}.{:02}", start.hour(), start.minute())
+    }
 }
 
 /// Minutes since midnight for a local 'HH:MM'; None on malformed input.
@@ -428,7 +473,7 @@ mod tests {
                 .unwrap(),
             0
         );
-        // In the window: exactly one send, payload carries title + HH:MM.
+        // In the window: exactly one send, payload carries title + day + time.
         assert_eq!(
             scan_once(&db, &pusher, "2026-07-06T17:31:00Z")
                 .await
@@ -437,7 +482,11 @@ mod tests {
         );
         let log = sent.lock().await.clone();
         assert_eq!(log.len(), 1);
-        assert!(log[0].1.contains("18:00"));
+        assert!(
+            log[0].1.contains("Tänään ma 6.7. klo 18.00"),
+            "{}",
+            log[0].1
+        );
         assert!(log[0].1.contains("Jumppa"));
         // Second pass in the same window: dedup, nothing more.
         assert_eq!(
@@ -828,6 +877,76 @@ mod tests {
             0
         );
     }
+    // --- reminder_body: the notification must say WHEN, not just the hour ---
+
+    #[test]
+    fn body_says_today_with_date_and_time() {
+        // Fires 17:31 on Mon 6.7. for an 18:00 start the same day.
+        assert_eq!(
+            reminder_body("2026-07-06T18:00:00Z", false, "2026-07-06T17:31:00Z"),
+            "Tänään ma 6.7. klo 18.00"
+        );
+    }
+
+    #[test]
+    fn body_says_tomorrow_for_a_day_ahead_reminder() {
+        // The bug report: a "1 vrk ennen" reminder read "Alkaa klo 14:00" and
+        // looked like today. Now it names the day — and the date, which stays
+        // correct even if the notification is read the next morning.
+        assert_eq!(
+            reminder_body("2026-07-07T14:00:00Z", false, "2026-07-06T14:00:00Z"),
+            "Huomenna ti 7.7. klo 14.00"
+        );
+    }
+
+    #[test]
+    fn body_uses_plain_date_further_out() {
+        assert_eq!(
+            reminder_body("2026-07-10T09:30:00Z", false, "2026-07-06T09:30:00Z"),
+            "pe 10.7. klo 9.30"
+        );
+    }
+
+    #[test]
+    fn body_counts_calendar_days_not_24h_spans() {
+        // Fires 23:50 for a 00:30 start: under an hour away, but it IS
+        // tomorrow — "Tänään" would be wrong.
+        assert_eq!(
+            reminder_body("2026-07-07T00:30:00Z", false, "2026-07-06T23:50:00Z"),
+            "Huomenna ti 7.7. klo 0.30"
+        );
+    }
+
+    #[test]
+    fn body_handles_year_boundary() {
+        assert_eq!(
+            reminder_body("2027-01-01T12:00:00Z", false, "2026-12-31T12:00:00Z"),
+            "Huomenna pe 1.1. klo 12.00"
+        );
+    }
+
+    #[test]
+    fn all_day_body_has_date_but_no_fake_midnight() {
+        // All-day starts are a nominal 00:00; "klo 0.00" would mislead.
+        let body = reminder_body("2026-07-07T00:00:00Z", true, "2026-07-06T09:00:00Z");
+        assert_eq!(body, "Huomenna ti 7.7., koko päivän");
+        assert!(!body.contains("klo"));
+    }
+
+    #[test]
+    fn body_falls_back_safely_on_malformed_times() {
+        // Never panic in the scheduler; degrade to the old time-only text,
+        // or a generic line if even the time is unreadable.
+        assert_eq!(
+            reminder_body("garbage", false, "2026-07-06T09:00:00Z"),
+            "Tapahtuma alkaa pian"
+        );
+        assert_eq!(
+            reminder_body("2026-07-07T14:00:00Z", false, "garbage"),
+            "ti 7.7. klo 14.00"
+        );
+    }
+
     #[tokio::test]
     async fn all_day_reminder_fires_at_nine_with_all_day_body() {
         let (app, db) = push_app_with_db().await;
@@ -870,7 +989,11 @@ mod tests {
             1
         );
         let log = sent.lock().await.clone();
-        assert!(log[0].1.contains("Koko päivän tapahtuma"));
-        assert!(!log[0].1.contains("Alkaa klo"));
+        assert!(
+            log[0].1.contains("Huomenna ti 7.7., koko päivän"),
+            "{}",
+            log[0].1
+        );
+        assert!(!log[0].1.contains("klo"));
     }
 }
