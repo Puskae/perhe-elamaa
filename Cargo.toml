@@ -19,8 +19,12 @@ rrule = "0.14"
 # Date math for bridging our floating "…Z" strings to rrule's DateTime types.
 # default-features = false keeps it lean; "alloc" enables parsing/formatting.
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
-# Web Push (VAPID) sender — server only; NOT WASM-safe, never in shared.
-web-push = "0.11"
+# Web Push (VAPID) signing + payload encryption — server only; NOT WASM-safe,
+# never in shared. default-features = false drops its bundled isahc client
+# (libcurl + zlib + nghttp2, all C): we send the request it builds with
+# reqwest instead (crates/server/src/push.rs). OpenSSL remains, via the `ece`
+# crate web-push encrypts payloads with — it has no pure-Rust backend.
+web-push = { version = "0.11", default-features = false }
 # VAPID keypair generation (same ES256 impl web-push uses internally).
 jwt-simple = { version = "0.12", default-features = false, features = ["pure-rust"] }
 sqlx = { version = "0.9", default-features = false, features = [
