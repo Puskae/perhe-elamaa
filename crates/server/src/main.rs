@@ -54,6 +54,8 @@ struct AppState {
     setup_gate: SetupGate,
     /// Per-username login backoff, shared by every request.
     login_throttle: Arc<LoginThrottle>,
+    /// Per-user cap on `/api/client-error` reports (see `routes.rs`).
+    client_error_limiter: Arc<routes::ClientErrorLimiter>,
 }
 
 #[cfg(test)]
@@ -70,6 +72,7 @@ impl AppState {
             // Tests call /api/setup without a token (see `SetupGate::Open`).
             setup_gate: SetupGate::Open,
             login_throttle: Arc::new(LoginThrottle::default()),
+            client_error_limiter: Arc::default(),
         }
     }
 }
@@ -257,6 +260,7 @@ async fn run() {
         pusher,
         setup_gate,
         login_throttle: Arc::new(LoginThrottle::default()),
+        client_error_limiter: Arc::default(),
     };
 
     // Background reminder scheduler (Phase 5C): 60 s scan-and-push loop.

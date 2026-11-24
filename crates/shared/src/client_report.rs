@@ -11,7 +11,12 @@ use serde::{Deserialize, Serialize};
 ///
 /// Sent with `navigator.sendBeacon` from the app's panic hook, so it must stay
 /// small and simple — a beacon is fire-and-forget and can't carry headers.
+///
+/// `deny_unknown_fields`: the server parses this from untrusted input, and the
+/// app sends exactly these two fields (it uses this same struct), so anything
+/// extra is not our client — reject it rather than silently ignore it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientErrorReport {
     /// Human-readable description (for a panic: the panic message).
     pub message: String,
