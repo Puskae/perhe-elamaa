@@ -76,9 +76,9 @@ const MAX_ENDPOINT_LEN: usize = 1024;
 /// (re-)subscribed one, so a user can't grow the table without bound.
 pub const MAX_SUBS_PER_USER: i64 = 10;
 
-/// Upper bound on one push round-trip (connect + TLS + request + response).
-/// The isahc client web-push builds by default never times out, so without
-/// this a black-holed endpoint would stall the scheduler tick forever.
+/// Upper bound on one push round-trip (connect + TLS + request + response),
+/// enforced around the whole exchange in `deliver` — without it a black-holed
+/// endpoint could stall the reminder scheduler's tick.
 const PUSH_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn host_allowed(host: &str) -> bool {
@@ -154,73 +154,157 @@ fn stored_sub_problem(endpoint: &str, keys_json: &str) -> Option<&'static str> {
 }
 
 /// The real transport. Built ONCE at startup and shared through `AppState`
-/// (behind an `Arc`): the isahc client inside owns a background agent thread
-/// and a connection pool, so one per request would be wasteful.
+/// (behind an `Arc`): the reqwest client inside owns a connection pool, so
+/// reusing it keeps TLS sessions to FCM/Apple/Mozilla warm between pushes.
 pub struct WebPushPusher {
     private_key: String,
-    client: web_push::IsahcWebPushClient,
+    client: reqwest::Client,
 }
 
 impl WebPushPusher {
     pub fn new(private_key_b64: String) -> Result<Self, ApiError> {
-        // `Configurable` is the isahc trait that adds `.timeout()` etc. to the
-        // builder; trait methods are only callable while the trait is in scope.
-        use isahc::config::Configurable as _;
-        use std::time::Duration;
-        const PUSH_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
-        const PUSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-        // Transport-level limits, so a stalled push service can't hold a
-        // connection (and the curl agent's slot) open forever. The tokio
-        // timeout in `send` stays as the outer bound.
-        let http = isahc::HttpClient::builder()
-            .timeout(PUSH_HTTP_TIMEOUT)
-            .connect_timeout(PUSH_CONNECT_TIMEOUT)
-            .build()
-            .map_err(|e| {
-                tracing::error!("push client init failed: {e}");
-                ApiError::Internal
-            })?;
+        let client = push_http_client().map_err(|e| {
+            tracing::error!("push client init failed: {e}");
+            ApiError::Internal
+        })?;
         Ok(Self {
             private_key: private_key_b64,
-            // web-push implements `From<isahc::HttpClient>` for its client.
-            client: web_push::IsahcWebPushClient::from(http),
+            client,
         })
     }
 }
 
 impl Pusher for WebPushPusher {
     async fn send(&self, endpoint: &str, keys_json: &str, payload: &str) -> Result<(), PushError> {
-        use web_push::WebPushClient as _;
-        use web_push::WebPushError;
         // Belt and braces: callers already filter, but this is the last stop
-        // before web-push's panicking VAPID signer, so never trust the caller.
+        // before web-push's panicking VAPID signer — and the SSRF allowlist —
+        // so never trust the caller.
         validate_endpoint(endpoint).map_err(|_| PushError::Gone)?;
-        // Fixed message: serde's error text can echo input, i.e. key material.
-        let keys: SubKeys = serde_json::from_str(keys_json)
-            .map_err(|_| PushError::Other("malformed keys_json".into()))?;
-        let info = web_push::SubscriptionInfo::new(endpoint, &keys.p256dh, &keys.auth);
-        let sig = web_push::VapidSignatureBuilder::from_base64(&self.private_key, &info)
-            .and_then(|b| b.build())
-            .map_err(|e| PushError::Other(e.to_string()))?;
-        let mut msg = web_push::WebPushMessageBuilder::new(&info);
-        msg.set_vapid_signature(sig);
-        msg.set_payload(web_push::ContentEncoding::Aes128Gcm, payload.as_bytes());
-        let msg = msg.build().map_err(|e| PushError::Other(e.to_string()))?;
-        // `tokio::time::timeout` races the send against a timer; on expiry the
-        // send future is dropped, which makes isahc abort the transfer.
-        let Ok(result) = tokio::time::timeout(PUSH_SEND_TIMEOUT, self.client.send(msg)).await
-        else {
-            return Err(PushError::Other("timed out".into()));
-        };
-        match result {
-            Ok(()) => Ok(()),
-            // 404/410/unparseable endpoint = the subscription is dead for good.
-            Err(WebPushError::EndpointNotValid(_))
-            | Err(WebPushError::EndpointNotFound(_))
-            | Err(WebPushError::InvalidUri) => Err(PushError::Gone),
-            // Auth, rate-limit/5xx, payload-too-large etc. are transient or
-            // config-related — log them with their category, never prune.
-            Err(e) => Err(PushError::Other(format!("{}: {e}", e.short_description()))),
+        let request = build_push_request(
+            &self.client,
+            &self.private_key,
+            endpoint,
+            keys_json,
+            payload,
+        )?;
+        deliver(&self.client, request).await
+    }
+}
+
+const PUSH_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const PUSH_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// How much of a push service's response body we keep. Only used for the log
+/// line on failure, and real error bodies are a few hundred bytes of JSON.
+const MAX_RESPONSE_BODY: usize = 4 * 1024;
+/// How much of that body makes it into the log line.
+const MAX_LOGGED_BODY: usize = 200;
+
+/// The HTTP client every push goes out on.
+///
+/// `redirect::Policy::none()` is a security setting, not a nicety:
+/// `validate_endpoint` only vets the URL we were *given*. reqwest follows up to
+/// 10 redirects by default, so an allowlisted host answering 307 → an internal
+/// address would walk straight past the SSRF allowlist. No push service
+/// redirects, so a 3xx is simply reported as a failure.
+fn push_http_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(PUSH_HTTP_TIMEOUT)
+        .connect_timeout(PUSH_CONNECT_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
+
+/// Sign (VAPID), encrypt (aes128gcm) and address one push, ready to send.
+///
+/// web-push does the cryptography and hands back an `http::Request` — from
+/// the older `http` 0.2 crate it's built on. reqwest speaks `http` 1.x, so the
+/// two `Request` types are unrelated to the compiler; we copy the method-less
+/// parts across by value (URL, header names/bytes, body). The method is
+/// always POST for Web Push.
+fn build_push_request(
+    client: &reqwest::Client,
+    private_key_b64: &str,
+    endpoint: &str,
+    keys_json: &str,
+    payload: &str,
+) -> Result<reqwest::Request, PushError> {
+    // Fixed message: serde's error text can echo input, i.e. key material.
+    let keys: SubKeys = serde_json::from_str(keys_json)
+        .map_err(|_| PushError::Other("malformed keys_json".into()))?;
+    let info = web_push::SubscriptionInfo::new(endpoint, &keys.p256dh, &keys.auth);
+    let sig = web_push::VapidSignatureBuilder::from_base64(private_key_b64, &info)
+        .and_then(|b| b.build())
+        .map_err(|e| PushError::Other(e.to_string()))?;
+    let mut msg = web_push::WebPushMessageBuilder::new(&info);
+    msg.set_vapid_signature(sig);
+    msg.set_payload(web_push::ContentEncoding::Aes128Gcm, payload.as_bytes());
+    let msg = msg.build().map_err(|e| PushError::Other(e.to_string()))?;
+
+    // `::<Vec<u8>>` (the "turbofish") picks the body type for web-push's
+    // generic `build_request<T>`; Vec<u8> is what reqwest takes as a body.
+    let (parts, body) = web_push::request_builder::build_request::<Vec<u8>>(msg).into_parts();
+    let mut builder = client.post(parts.uri.to_string());
+    for (name, value) in &parts.headers {
+        builder = builder.header(name.as_str(), value.as_bytes());
+    }
+    builder
+        .body(body)
+        .build()
+        .map_err(|e| PushError::Other(format!("building request: {}", e.without_url())))
+}
+
+/// Send one prepared push and turn the outcome into a [`PushError`].
+///
+/// Sits *below* `validate_endpoint` (it sends wherever `request` points), so
+/// only call it with a request from [`build_push_request`] on a vetted URL.
+async fn deliver(client: &reqwest::Client, request: reqwest::Request) -> Result<(), PushError> {
+    // An `async` block is a future we haven't started yet — wrapping the
+    // whole exchange in one lets a single `timeout` bound connect, upload AND
+    // reading the response. On expiry the future is dropped, which closes the
+    // connection.
+    let exchange = async {
+        let mut resp = client.execute(request).await?;
+        let status = resp.status().as_u16();
+        // Read the body chunk by chunk and stop at the cap, instead of
+        // `resp.bytes()` which would buffer whatever the server sends.
+        let mut body = Vec::new();
+        while body.len() < MAX_RESPONSE_BODY {
+            match resp.chunk().await? {
+                Some(chunk) => body.extend_from_slice(&chunk),
+                None => break,
+            }
+        }
+        body.truncate(MAX_RESPONSE_BODY);
+        // The `::<_, reqwest::Error>` tells `?` above what error type this
+        // block returns — closures and async blocks can't declare one.
+        Ok::<_, reqwest::Error>((status, body))
+    };
+    match tokio::time::timeout(PUSH_SEND_TIMEOUT, exchange).await {
+        Err(_elapsed) => Err(PushError::Other("timed out".into())),
+        // `without_url()`: reqwest's Display appends the URL, and a push
+        // endpoint's path is a per-device secret that mustn't reach the logs.
+        Ok(Err(e)) => Err(PushError::Other(format!("transport: {}", e.without_url()))),
+        Ok(Ok((status, body))) => classify(status, &body),
+    }
+}
+
+/// What a push service's HTTP status means for the subscription (RFC 8030 §6).
+fn classify(status: u16, body: &[u8]) -> Result<(), PushError> {
+    match status {
+        200..=299 => Ok(()),
+        // 404/410 = the subscription is dead for good → caller prunes it.
+        404 | 410 => Err(PushError::Gone),
+        // Auth, rate-limit/5xx, payload-too-large, unexpected redirects are
+        // transient or ours — log with a short body snippet, never prune.
+        _ => {
+            let text = String::from_utf8_lossy(body);
+            // `chars().take(..)` cuts on character boundaries; slicing the
+            // String by byte index could panic in the middle of "ä".
+            let snippet: String = text.chars().take(MAX_LOGGED_BODY).collect();
+            Err(PushError::Other(format!(
+                "HTTP {status}: {}",
+                snippet.trim()
+            )))
         }
     }
 }
@@ -461,6 +545,203 @@ async fn vapid(State(state): State<AppState>) -> Result<Json<VapidResponse>, Api
     }))
 }
 
+/// Tests for the HTTP transport itself: how responses are classified, that the
+/// client never follows redirects, and that the request web-push builds
+/// survives the hop into reqwest intact. They talk to a throwaway axum server
+/// on 127.0.0.1 — `deliver` sits *below* `validate_endpoint`, which is the
+/// only thing that insists on https + allowlisted hosts.
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use axum::http::{HeaderMap, header};
+    use axum::response::IntoResponse;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Serve `app` on an OS-assigned port; returns its base URL. Port 0 asks
+    /// the kernel for any free port, so parallel tests never collide.
+    async fn serve(app: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    async fn post_to(url: String) -> Result<(), PushError> {
+        let client = push_http_client().unwrap();
+        let req = client.post(url).body("x").build().unwrap();
+        deliver(&client, req).await
+    }
+
+    #[test]
+    fn classify_maps_push_service_statuses() {
+        assert!(classify(201, b"").is_ok()); // FCM/Mozilla/Apple all answer 201
+        assert!(classify(200, b"").is_ok());
+        // Dead subscriptions → Gone, so the caller prunes the row.
+        assert!(matches!(classify(404, b""), Err(PushError::Gone)));
+        assert!(matches!(classify(410, b""), Err(PushError::Gone)));
+        // Everything else is logged but must NOT prune: auth problems, rate
+        // limits and outages are ours or temporary, not the device's.
+        for status in [301, 302, 307, 400, 401, 403, 413, 429, 500, 503] {
+            match classify(status, b"oops") {
+                Err(PushError::Other(msg)) => assert!(msg.contains(&status.to_string()), "{msg}"),
+                other => panic!("{status} gave {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn classify_log_line_is_bounded() {
+        let Err(PushError::Other(msg)) = classify(500, &[b'a'; 10_000]) else {
+            panic!("expected Other");
+        };
+        assert!(msg.len() < 300, "log line {} bytes", msg.len());
+    }
+
+    #[tokio::test]
+    async fn redirects_are_never_followed() {
+        // SSRF guard: `validate_endpoint` vets the URL we were given, but if
+        // the client followed a 3xx it could be bounced anywhere — the LAN,
+        // localhost, cloud metadata. reqwest follows redirects by default.
+        let hit = Arc::new(AtomicBool::new(false));
+        let hit2 = hit.clone();
+        let target = serve(Router::new().route(
+            "/",
+            post(move || async move {
+                hit2.store(true, Ordering::SeqCst);
+                StatusCode::CREATED
+            }),
+        ))
+        .await;
+        let bouncer =
+            serve(Router::new().route(
+                "/",
+                post(move || async move {
+                    (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, target)])
+                }),
+            ))
+            .await;
+
+        let result = post_to(bouncer).await;
+        assert!(
+            matches!(result, Err(PushError::Other(ref m)) if m.contains("307")),
+            "{result:?}"
+        );
+        assert!(!hit.load(Ordering::SeqCst), "redirect was followed");
+    }
+
+    #[tokio::test]
+    async fn deliver_reports_success_and_gone() {
+        let base = serve(
+            Router::new()
+                .route("/ok", post(|| async { StatusCode::CREATED }))
+                .route("/gone", post(|| async { StatusCode::GONE })),
+        )
+        .await;
+        assert!(post_to(format!("{base}/ok")).await.is_ok());
+        assert!(matches!(
+            post_to(format!("{base}/gone")).await,
+            Err(PushError::Gone)
+        ));
+    }
+
+    #[tokio::test]
+    async fn huge_error_bodies_are_not_buffered_whole() {
+        // A misbehaving service streaming a giant body must not be read into
+        // memory: we only want a snippet for the log.
+        let base = serve(Router::new().route(
+            "/",
+            post(|| async {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    vec![b'z'; 8 * 1024 * 1024],
+                )
+            }),
+        ))
+        .await;
+        let Err(PushError::Other(msg)) = post_to(base).await else {
+            panic!("expected Other");
+        };
+        assert!(msg.contains("500") && msg.len() < 300, "{msg}");
+    }
+
+    #[tokio::test]
+    async fn transport_errors_do_not_leak_the_endpoint_url() {
+        // The endpoint path is a per-device capability token; it must not end
+        // up in logs (or GlitchTip) through reqwest's error Display, which
+        // appends the URL by default.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener); // nothing listens here now → connection refused
+        let Err(PushError::Other(msg)) =
+            post_to(format!("http://{addr}/secret-device-token")).await
+        else {
+            panic!("expected Other");
+        };
+        assert!(!msg.contains("secret-device-token"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn built_request_carries_web_push_headers_and_encrypted_body() {
+        // Record what actually arrives on the wire.
+        let seen: Arc<tokio::sync::Mutex<Option<(HeaderMap, usize)>>> = Default::default();
+        let seen2 = seen.clone();
+        let base = serve(Router::new().route(
+            "/push",
+            post(
+                move |headers: HeaderMap, body: axum::body::Bytes| async move {
+                    *seen2.lock().await = Some((headers, body.len()));
+                    StatusCode::CREATED.into_response()
+                },
+            ),
+        ))
+        .await;
+
+        // A real browser-style subscription: an actual P-256 public key, since
+        // web-push really encrypts the payload to it (fake bytes fail ECDH).
+        use jwt_simple::algorithms::ECDSAP256PublicKeyLike as _;
+        let browser = jwt_simple::algorithms::ES256KeyPair::generate();
+        let keys = serde_json::json!({
+            "p256dh": URL_SAFE_NO_PAD.encode(browser.public_key().public_key().to_bytes_uncompressed()),
+            "auth": URL_SAFE_NO_PAD.encode([3u8; 16]),
+        })
+        .to_string();
+        let vapid_private =
+            URL_SAFE_NO_PAD.encode(jwt_simple::algorithms::ES256KeyPair::generate().to_bytes());
+
+        let client = push_http_client().unwrap();
+        let payload = r#"{"title":"Muistutus"}"#;
+        let req = build_push_request(
+            &client,
+            &vapid_private,
+            &format!("{base}/push"),
+            &keys,
+            payload,
+        )
+        .unwrap();
+        deliver(&client, req).await.unwrap();
+
+        let (headers, body_len) = seen.lock().await.take().expect("request arrived");
+        let h = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+        };
+        assert_eq!(h("content-encoding"), "aes128gcm");
+        assert!(h("ttl").parse::<u32>().is_ok(), "TTL {:?}", h("ttl"));
+        assert!(
+            h("authorization").starts_with("vapid t="),
+            "{}",
+            h("authorization")
+        );
+        assert_eq!(h("content-length"), body_len.to_string());
+        // Encrypted: the plaintext isn't in there, and aes128gcm adds a header
+        // record + auth tag, so the body is strictly longer.
+        assert!(body_len > payload.len());
+    }
+}
+
 /// Test double shared by reminder + announcement tests: records sends
 /// instead of pushing. Lives here (not in a test module) so both callers
 /// can `use crate::push::test_support::FakePusher`.
@@ -470,8 +751,8 @@ pub(crate) mod test_support {
     use base64::Engine as _;
     use std::sync::{Arc, OnceLock};
 
-    /// One real pusher shared by every test's `AppState` (a `static` so the
-    /// isahc agent thread is spawned once per test binary, not per test).
+    /// One real pusher shared by every test's `AppState` (a `static` so its
+    /// client and connection pool are built once per test binary, not per test).
     /// `OnceLock::get_or_init` runs the closure on first use only. Its key is
     /// random and unrelated to any DB's VAPID key — tests never reach the
     /// network with it (only invalid endpoints are ever sent through it).
