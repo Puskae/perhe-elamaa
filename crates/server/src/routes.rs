@@ -7,7 +7,7 @@ use crate::auth::{
 use crate::error::ApiError;
 use crate::session::{self, AdminUser, CurrentUser, SESSION_COOKIE};
 use crate::throttle::Attempt;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -76,7 +76,73 @@ pub fn general_router() -> Router<AppState> {
         .route("/api/me", get(me))
         .route("/api/family/members", get(list_members))
         .route("/api/family/invites", post(create_invite))
-        .route("/api/client-error", post(report_client_error))
+        // `.layer` on the method router applies to this one route only. It
+        // caps what the `String` extractor will buffer, so an oversized body
+        // is refused with 413 before serde ever sees it.
+        .route(
+            "/api/client-error",
+            post(report_client_error).layer(DefaultBodyLimit::max(CLIENT_ERROR_MAX_BODY)),
+        )
+}
+
+/// Largest client error report we accept, in bytes. Real ones (a panic
+/// message + a route) are a few hundred bytes.
+pub(crate) const CLIENT_ERROR_MAX_BODY: usize = 16 * 1024;
+/// Reports one user may send back-to-back before throttling kicks in…
+pub(crate) const CLIENT_ERROR_BURST: u32 = 5;
+/// …after which they earn one more every this often (5/minute sustained).
+const CLIENT_ERROR_REFILL: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// Per-user token bucket for `/api/client-error`.
+///
+/// Every accepted report becomes a `tracing::error!` and so a GlitchTip event.
+/// Without a limit, one account — or a client stuck in a panic loop — could
+/// flood the logs and burn the GlitchTip event quota, so the *next real* crash
+/// gets dropped. Keyed by user id, which comes from the session, not the
+/// request: a caller can't mint fresh keys, and the map is bounded by the
+/// number of accounts, so it needs no cleanup.
+pub struct ClientErrorLimiter(governor::DefaultKeyedRateLimiter<i64>);
+
+impl Default for ClientErrorLimiter {
+    fn default() -> Self {
+        // `NonZeroU32::new(..).expect(..)` on a constant: governor's API takes
+        // `NonZeroU32` so "a burst of 0" is unrepresentable. `Quota::with_period`
+        // returns `None` only for a zero period.
+        let burst = std::num::NonZeroU32::new(CLIENT_ERROR_BURST).expect("burst > 0");
+        let quota = governor::Quota::with_period(CLIENT_ERROR_REFILL)
+            .expect("refill period > 0")
+            .allow_burst(burst);
+        Self(governor::RateLimiter::keyed(quota))
+    }
+}
+
+impl ClientErrorLimiter {
+    /// Take one token from `user_id`'s bucket; `false` = over the limit.
+    pub fn allow(&self, user_id: i64) -> bool {
+        self.0.check_key(&user_id).is_ok()
+    }
+}
+
+/// Make untrusted text safe to put in a log line: keep at most `max_chars`
+/// characters, and turn control characters into visible escapes (`\n`,
+/// `\u{1b}`). Otherwise a report containing "\n<timestamp> INFO …" would forge
+/// an extra, legitimate-looking log line, and ANSI codes could repaint a
+/// terminal tailing the logs. Escaping (vs. stripping) keeps a real panic
+/// message's line breaks readable.
+fn log_safe(text: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(text.len().min(max_chars));
+    // `.chars()` walks Unicode scalar values, so `take` can't cut "ä" in half
+    // the way slicing by byte index could.
+    for c in text.chars().take(max_chars) {
+        if c.is_control() {
+            // `escape_default` yields the escape as several chars ('\\', 'n');
+            // `extend` appends them all.
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// `POST /api/client-error` — the app's panic hook beacons browser-side errors
@@ -86,13 +152,27 @@ pub fn general_router() -> Router<AppState> {
 /// The body is parsed by hand instead of with the `Json` extractor:
 /// `navigator.sendBeacon` sends `text/plain`, which the extractor would
 /// reject with a 415 before we ever saw the report.
-async fn report_client_error(user: CurrentUser, body: String) -> Result<StatusCode, ApiError> {
+///
+/// Input is bounded at three points: the route's body limit (size), the fixed
+/// two-field struct with `deny_unknown_fields` (shape), and the per-user
+/// limiter (rate). What reaches the log is then length-capped and escaped.
+async fn report_client_error(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    body: String,
+) -> Result<StatusCode, ApiError> {
     let report: ClientErrorReport = serde_json::from_str(&body)
         .map_err(|_| ApiError::BadRequest("Virheellinen virheraportti.".to_owned()))?;
 
-    // The report is untrusted input headed for the logs — cap its size.
-    let message: String = report.message.chars().take(2000).collect();
-    let url: String = report.url.unwrap_or_default().chars().take(500).collect();
+    // Over the limit: still 204. A beacon can't act on an error, and a client
+    // in a crash loop retrying on 429 would only make the flood worse.
+    if !state.client_error_limiter.allow(user.user_id) {
+        tracing::debug!(user_id = user.user_id, "client error report throttled");
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    let message = log_safe(&report.message, 2000);
+    let url = log_safe(&report.url.unwrap_or_default(), 500);
     tracing::error!(user_id = user.user_id, url = %url, "client error: {message}");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1025,6 +1105,90 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn client_error_rejects_oversized_body_before_parsing() {
+        let app = app().await;
+        let cookie = setup_admin(&app).await;
+        // Valid JSON, just far bigger than any real crash report.
+        let huge = "x".repeat(CLIENT_ERROR_MAX_BODY + 1);
+        let resp = app
+            .oneshot(post_auth(
+                "/api/client-error",
+                json!({ "message": huge, "url": null }),
+                &cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn client_error_rejects_unknown_fields() {
+        let app = app().await;
+        let cookie = setup_admin(&app).await;
+        let resp = app
+            .oneshot(post_auth(
+                "/api/client-error",
+                json!({ "message": "boom", "url": null, "extra": [1, 2, 3] }),
+                &cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A crash loop (or a hostile account) firing reports nonstop must never
+    /// see an error — the beacon can't act on one — but only the first
+    /// `CLIENT_ERROR_BURST` may reach the logs.
+    #[tokio::test]
+    async fn client_error_flood_is_accepted_but_throttled() {
+        let app = app().await;
+        let cookie = setup_admin(&app).await;
+        for i in 0..(CLIENT_ERROR_BURST * 4) {
+            let resp = app
+                .clone()
+                .oneshot(post_auth(
+                    "/api/client-error",
+                    json!({ "message": format!("boom {i}"), "url": null }),
+                    &cookie,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT, "report {i}");
+        }
+    }
+
+    #[test]
+    fn client_error_limiter_is_per_user() {
+        let limiter = ClientErrorLimiter::default();
+        for _ in 0..CLIENT_ERROR_BURST {
+            assert!(limiter.allow(1));
+        }
+        assert!(!limiter.allow(1), "user 1 is over the burst");
+        // Another user's crash reports are unaffected by user 1's flood.
+        assert!(limiter.allow(2));
+    }
+
+    #[test]
+    fn log_safe_escapes_control_chars_and_caps_length() {
+        // A newline + fake log line, and an ANSI colour code: both must come
+        // out as visible escapes, not as real line breaks / terminal codes.
+        let forged = "boom\n2026-11-24T10:00:00Z  INFO login ok user=admin\u{1b}[31m";
+        let safe = log_safe(forged, 2000);
+        assert!(!safe.chars().any(char::is_control), "{safe:?}");
+        assert!(
+            safe.contains(r"\n2026") && safe.contains(r"\u{1b}[31m"),
+            "{safe}"
+        );
+        // Ordinary text, including non-ASCII, passes through untouched.
+        assert_eq!(
+            log_safe("Virhe ostoslistassa: ä ö", 2000),
+            "Virhe ostoslistassa: ä ö"
+        );
+        // The cap counts characters of the input, so it can't split "ä".
+        assert_eq!(log_safe("ääää", 2), "ää");
     }
 
     // --- setup token ------------------------------------------------------
