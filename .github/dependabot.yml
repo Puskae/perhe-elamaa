@@ -34,3 +34,10 @@ updates:
       # quietly drops that feature. Move it together with argon2 by hand.
       - dependency-name: password-hash
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      # isahc is named directly only to set timeouts on the client web-push
+      # uses, so it must match the isahc web-push itself depends on (1.x as of
+      # web-push 0.11.0). A major bump splits it into two copies and
+      # `IsahcWebPushClient::from` stops compiling (see PR #19). Drop this once
+      # web-push moves to isahc 2, or once isahc is gone from the tree.
+      - dependency-name: isahc
+        update-types: ["version-update:semver-major"]
