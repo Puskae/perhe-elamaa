@@ -18,11 +18,13 @@ sqlx = { workspace = true }
 time = { workspace = true }
 axum-extra = { version = "0.12", features = ["cookie"] }
 serde = { workspace = true }
-argon2 = "0.5"
-# argon2 re-exports password-hash but doesn't forward its `getrandom` feature,
-# which is what provides `OsRng`. Depending on it directly with that feature
-# enables it via Cargo's feature unification.
-password-hash = { version = "0.5", features = ["getrandom"] }
+# Default features include `getrandom`, which argon2 0.6 forwards to its
+# password-hash dependency — that's what lets `hash_password` draw a salt from
+# the OS RNG on its own.
+argon2 = "0.6"
+# Raw OS randomness for session tokens, invite codes and the setup token.
+# Same major version password-hash 0.6 uses, so it stays a single copy.
+getrandom = "0.4"
 sha2 = "0.11"
 base64 = "0.23"
 hex = "0.4"

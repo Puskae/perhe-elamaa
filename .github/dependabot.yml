@@ -28,12 +28,6 @@ updates:
       cargo-minor-patch:
         update-types: ["minor", "patch"]
     ignore:
-      # The direct password-hash dependency only exists to switch on the
-      # `getrandom` feature of the copy argon2 uses (see
-      # crates/server/Cargo.toml). A major bump adds a second, unused copy and
-      # quietly drops that feature. Move it together with argon2 by hand.
-      - dependency-name: password-hash
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
       # isahc is named directly only to set timeouts on the client web-push
       # uses, so it must match the isahc web-push itself depends on (1.x as of
       # web-push 0.11.0). A major bump splits it into two copies and
