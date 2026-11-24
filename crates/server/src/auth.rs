@@ -4,9 +4,10 @@
 //! makes them easy to test in isolation. The handlers and the session
 //! extractor (added in 1C) build on top of these.
 
-use argon2::Argon2;
-use argon2::password_hash::rand_core::{OsRng, RngCore};
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+// `PasswordHasher`/`PasswordVerifier` are traits: importing them is what makes
+// their methods (`hash_password`, `verify_password`) callable on `Argon2`.
+// Rust only lets you call a trait method when the trait is in scope.
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
@@ -19,8 +20,9 @@ use subtle::ConstantTimeEq;
 /// Argon2id (the default) is memory-hard, which is what makes it expensive for
 /// an attacker to brute-force even with a leaked database.
 pub fn hash_password(plain: &str) -> Result<String, argon2::password_hash::Error> {
-    let salt = SaltString::generate(&mut OsRng);
-    let hash = Argon2::default().hash_password(plain.as_bytes(), &salt)?;
+    // Since argon2 0.6 the hasher draws the 16-byte salt from the OS RNG
+    // itself (its `getrandom` feature), so there's no salt to pass in.
+    let hash = Argon2::default().hash_password(plain.as_bytes())?;
     Ok(hash.to_string())
 }
 
@@ -39,10 +41,22 @@ pub fn verify_password(plain: &str, phc_hash: &str) -> bool {
 /// Generate a fresh session token: 32 cryptographically-random bytes encoded as
 /// URL-safe base64. This is the secret value handed to the client in a cookie.
 pub fn generate_token() -> String {
-    let mut bytes = [0u8; 32];
-    let mut rng = OsRng;
-    rng.fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
+    URL_SAFE_NO_PAD.encode(random_bytes::<32>())
+}
+
+/// `N` bytes straight from the operating system's CSPRNG.
+///
+/// `<const N: usize>` is a *const generic*: the array length is a compile-time
+/// parameter, so `random_bytes::<32>()` returns a `[u8; 32]` on the stack — no
+/// allocation, and the caller can't get the length wrong.
+///
+/// Panics if the OS can't supply randomness. That only happens on a badly
+/// broken system, and minting a guessable token instead would be far worse —
+/// so failing loudly is the safe choice (the old `OsRng` did the same).
+fn random_bytes<const N: usize>() -> [u8; N] {
+    let mut bytes = [0u8; N];
+    getrandom::fill(&mut bytes).expect("OS random number generator failed");
+    bytes
 }
 
 /// Hash a token (or invite code) with SHA-256, returned as lowercase hex.
@@ -63,10 +77,7 @@ const INVITE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 /// Generate a human-typeable single-use invite code, formatted `XXXX-XXXX`.
 pub fn generate_invite_code() -> String {
-    let mut bytes = [0u8; 8];
-    let mut rng = OsRng;
-    rng.fill_bytes(&mut bytes);
-    let chars: String = bytes
+    let chars: String = random_bytes::<8>()
         .iter()
         .map(|b| INVITE_ALPHABET[*b as usize % INVITE_ALPHABET.len()] as char)
         .collect();
@@ -77,9 +88,7 @@ pub fn generate_invite_code() -> String {
 /// `XXXX-XXXX-XXXX-XXXX` from the same unambiguous alphabet as invite codes
 /// (16 symbols × 5 bits = 80 bits of entropy).
 pub fn generate_setup_token() -> String {
-    let mut bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut bytes);
-    let chars: Vec<char> = bytes
+    let chars: Vec<char> = random_bytes::<16>()
         .iter()
         .map(|b| INVITE_ALPHABET[*b as usize % INVITE_ALPHABET.len()] as char)
         .collect();
@@ -175,6 +184,46 @@ mod tests {
         assert_ne!(a, b);
         assert!(verify_password("hunter2", &a));
         assert!(verify_password("hunter2", &b));
+    }
+
+    /// A hash produced by the argon2 0.5 crate (PERKELE ≤ 1.0.7). Every
+    /// deployment's `users.password_hash` column is full of strings like this,
+    /// so a dependency upgrade that stopped verifying them would lock every
+    /// user out. Pinned as a literal so the test can't regenerate it with
+    /// whatever version is current.
+    const ARGON2_0_5_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$yyfriy+m5wh4isztVUUTZw$LtYlGZBoE0Ko13BlcAsxk8FEGZjXB7UoGG0xBUPJ11o";
+
+    #[test]
+    fn hashes_from_earlier_releases_still_verify() {
+        assert!(verify_password(
+            "correct horse battery staple",
+            ARGON2_0_5_HASH
+        ));
+        assert!(!verify_password(
+            "correct horse battery stapl",
+            ARGON2_0_5_HASH
+        ));
+    }
+
+    #[test]
+    fn new_hashes_are_argon2id_with_owasp_minimum_cost() {
+        // Parse the PHC string we produce and check its parameters, so a
+        // dependency bump that quietly weakened the defaults (or switched
+        // variant) would fail here instead of shipping.
+        let hash = hash_password("hunter2").unwrap();
+        let parsed = PasswordHash::new(&hash).unwrap();
+        assert_eq!(parsed.algorithm.as_str(), "argon2id");
+        assert_eq!(parsed.version, Some(0x13)); // v=19, the current spec
+        let param = |name: &str| -> u32 {
+            parsed
+                .params
+                .get_decimal(name)
+                .unwrap_or_else(|| panic!("missing {name}"))
+        };
+        // OWASP's argon2id floor: 19 MiB memory, 2 iterations, 1 lane.
+        assert!(param("m") >= 19_456);
+        assert!(param("t") >= 2);
+        assert!(param("p") >= 1);
     }
 
     #[test]
